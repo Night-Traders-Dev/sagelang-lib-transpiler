@@ -1,29 +1,17 @@
 # transpiler
 
 ## Purpose
-[Describe the purpose of this SageLang library module.]
+Code transformation and transpilation infrastructure for SageLang.
 
 ## Features
-- [Feature 1]
-- [Feature 2]
-
-## Installation
-Add as a submodule to your SageLang project:
-```bash
-git submodule add <repository-url> core/lib/transpiler
-```
-
-## API Documentation
-[Link to detailed API documentation]
+- **Parsers**: JSON parser, Python AST parser.
+- **Emitters**: Extensible emitters for transforming SageLang code to other languages (like Python).
 
 ## Usage Example
 ```sage
-import transpiler
-# Example usage...
+import transpiler.python
+import transpiler.json_parser
+
+let ast = transpiler.json_parser.parse(json_data)
+transpiler.python.emit(ast, "out.py")
 ```
-
-## Contributing
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
-## License
-MIT (or maintain main project license)
