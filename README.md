@@ -1,24 +1,29 @@
-# SageLang Transpiler Library
+# transpiler
 
-The `transpiler` library provides a robust framework for creating language-to-SageLang transpilers. It follows a modular architecture where each supported language has its own dedicated directory.
+## Purpose
+[Describe the purpose of this SageLang library module.]
 
-## Structure
-- `base.sage`: Defines the base `Transpiler` interface.
-- `python/`: Contains Python-to-SageLang parser backends, factory, and emitter.
-- `docs/`: Library documentation (SPEC, SECURITY, LANGUAGES).
+## Features
+- [Feature 1]
+- [Feature 2]
 
-## Quick Start
-To create a new transpiler, inherit from `Transpiler` and implement `parse` and `emit`.
-
-```sage
-import transpiler.base
-
-class MyLangTranspiler(Transpiler):
-    proc parse(source: String) -> Object:
-        # Parse MyLang to an internal AST representation
-        ...
-    
-    proc emit(ast: Object) -> String:
-        # Convert internal AST to SageLang code
-        ...
+## Installation
+Add as a submodule to your SageLang project:
+```bash
+git submodule add <repository-url> core/lib/transpiler
 ```
+
+## API Documentation
+[Link to detailed API documentation]
+
+## Usage Example
+```sage
+import transpiler
+# Example usage...
+```
+
+## Contributing
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+## License
+MIT (or maintain main project license)
