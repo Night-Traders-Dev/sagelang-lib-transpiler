@@ -71,6 +71,66 @@ class SageToLilyTranspiler(Transpiler):
             self.emit_expr(stmt.expression)
             self.write(")")
             self.write(chr(10))
+        elif type == ast.STMT_IF:
+            self.write_indent()
+            self.write("if ")
+            self.emit_expr(stmt.condition)
+            self.write(":\n")
+            if type(stmt.then_branch) == "Array":
+                self.indent_level = self.indent_level + 1
+                for b_stmt in stmt.then_branch:
+                    self.emit_stmt(b_stmt)
+                self.indent_level = self.indent_level - 1
+            else:
+                self.emit_stmt(stmt.then_branch)
+            
+            if stmt.else_branch != nil:
+                self.write_indent()
+                self.write("else:\n")
+                if type(stmt.else_branch) == "Array":
+                    self.indent_level = self.indent_level + 1
+                    for b_stmt in stmt.else_branch:
+                        self.emit_stmt(b_stmt)
+                    self.indent_level = self.indent_level - 1
+                else:
+                    self.emit_stmt(stmt.else_branch)
+        elif type == ast.STMT_BLOCK:
+            self.indent_level = self.indent_level + 1
+            for b_stmt in stmt.statements:
+                self.emit_stmt(b_stmt)
+            self.indent_level = self.indent_level - 1
+        elif type == ast.STMT_WHILE:
+            self.write_indent()
+            self.write("while ")
+            self.emit_expr(stmt.condition)
+            self.write(":\n")
+            if type(stmt.body) == "Array":
+                self.indent_level = self.indent_level + 1
+                for b_stmt in stmt.body:
+                    self.emit_stmt(b_stmt)
+                self.indent_level = self.indent_level - 1
+            else:
+                self.emit_stmt(stmt.body)
+        elif type == ast.STMT_FOR:
+            self.write_indent()
+            self.write("for ")
+            self.write(stmt.variable)
+            self.write(" in ")
+            self.emit_expr(stmt.iterable)
+            self.write(":\n")
+            if type(stmt.body) == "Array":
+                self.indent_level = self.indent_level + 1
+                for b_stmt in stmt.body:
+                    self.emit_stmt(b_stmt)
+                self.indent_level = self.indent_level - 1
+            else:
+                self.emit_stmt(stmt.body)
+        elif type == ast.STMT_BREAK:
+            self.write_indent()
+            self.write("break\n")
+        elif type == ast.STMT_CONTINUE:
+            self.write_indent()
+            self.write("continue\n")
         else:
             self.write_indent()
             self.write("// TODO: Unhandled stmt type " + str(type))
@@ -96,6 +156,64 @@ class SageToLilyTranspiler(Transpiler):
                 self.emit_expr(expr.args[i])
                 if i < count - 1:
                     self.write(", ")
+            self.write(")")
+        elif type == ast.EXPR_BOOL:
+            if expr.value:
+                self.write("true")
+            else:
+                self.write("false")
+        elif type == ast.EXPR_NIL:
+            self.write("nil")
+        elif type == ast.EXPR_ARRAY:
+            self.write("[")
+            let count = len(expr.elements)
+            for i in range(count):
+                self.emit_expr(expr.elements[i])
+                if i < count - 1:
+                    self.write(", ")
+            self.write("]")
+        elif type == ast.EXPR_DICT:
+            self.write("{")
+            let count = len(expr.keys)
+            if count == 0:
+                self.write(":")
+            for i in range(count):
+                self.emit_expr(expr.keys[i])
+                self.write(": ")
+                self.emit_expr(expr.values[i])
+                if i < count - 1:
+                    self.write(", ")
+            self.write("}")
+        elif type == ast.EXPR_INDEX:
+            self.emit_expr(expr.object)
+            self.write("[")
+            self.emit_expr(expr.index)
+            self.write("]")
+        elif type == ast.EXPR_INDEX_SET:
+            self.emit_expr(expr.object)
+            self.write("[")
+            self.emit_expr(expr.index)
+            self.write("] = ")
+            self.emit_expr(expr.value)
+        elif type == ast.EXPR_GET:
+            self.emit_expr(expr.object)
+            self.write(".")
+            self.write(expr.property)
+        elif type == ast.EXPR_SET:
+            self.emit_expr(expr.object)
+            self.write(".")
+            self.write(expr.property)
+            self.write(" = ")
+            self.emit_expr(expr.value)
+        elif type == ast.EXPR_TUPLE:
+            self.write("(")
+            let count = len(expr.elements)
+            for i in range(count):
+                self.emit_expr(expr.elements[i])
+                if i < count - 1:
+                    self.write(", ")
+            if count == 1:
+                self.write(",")
             self.write(")")
         else:
             self.write("/* unhandled expr type " + str(type) + " */")
