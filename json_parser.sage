@@ -3,8 +3,7 @@
 
 from json import cJSON_Parse, cJSON_Delete, cJSON_ToSage
 
-proc parse_json(json_str: String) -> Object:
-    let root = cJSON_Parse(json_str)
+proc parse_json(json_str) -> Object root = cJSON_Parse(json_str)
     let sage_dict = cJSON_ToSage(root)
     cJSON_Delete(root)
     return sage_dict

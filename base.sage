@@ -1,11 +1,11 @@
 class Transpiler:
-    proc parse(source: String) -> Object:
+    proc parse(self, source):
         # To be implemented by specific language parsers
         raise "Not implemented"
 
-    proc emit(ast: Object) -> String:
+    proc emit(self, ast):
         # To be implemented by SageLang emitters
         raise "Not implemented"
 
-    proc transpile(source: String) -> String:
+    proc transpile(self, source):
         return self.emit(self.parse(source))

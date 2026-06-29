@@ -1,60 +1,53 @@
 from transpiler.base import Transpiler
 import ast
+import parser
 
 class SageToLilyTranspiler(Transpiler):
     proc init(self):
         self.output = []
         self.indent_level = 0
 
-    proc parse(self, source: String) -> Object:
-        # Expected to be parsed externally or we can import parser if needed
-        return nil
+    proc parse(self, source):
+        return parser.parse_source(source)
 
-    proc emit(self, ast_stmts: Object) -> String:
+    proc emit(self, ast_node):
         self.output = []
         self.indent_level = 0
-        for stmt in ast_stmts:
+        for stmt in ast_node:
             self.emit_stmt(stmt)
         return join(self.output, "")
 
-    proc write(self, text: String):
+    proc write(self, text):
         push(self.output, text)
 
     proc write_indent(self):
         for i in range(self.indent_level):
             self.write("    ")
 
-    proc emit_stmt(self, stmt: Object):
+    proc emit_stmt(self, stmt):
+        if stmt == nil:
+            return
         let type = stmt.type
         if type == ast.STMT_LET:
             self.write_indent()
-            # Lily uses 'let' for immutable, similar to Sage
-            self.write("let ")
-            self.write(stmt.name)
+            self.write("var ")
+            self.write(stmt.name.text)
             if stmt.initializer != nil:
                 self.write(" = ")
                 self.emit_expr(stmt.initializer)
             self.write(chr(10))
         elif type == ast.STMT_PROC:
             self.write_indent()
-            # Lily syntax: return_type func name(params):
-            # Since Sage AST doesn't have strict return types by default on AST nodes, we assume 'var' or omit.
-            self.write("var func ")
-            self.write(stmt.name)
+            self.write("func ")
+            self.write(stmt.name.text)
             self.write("(")
-            # emit params
             let count = len(stmt.params)
             for i in range(count):
-                self.write("var " + stmt.params[i])
+                self.write(stmt.params[i].text)
                 if i < count - 1:
                     self.write(", ")
-            self.write("):")
-            self.write(chr(10))
-            self.indent_level = self.indent_level + 1
-            let body = stmt.body
-            for b_stmt in body:
-                self.emit_stmt(b_stmt)
-            self.indent_level = self.indent_level - 1
+            self.write("):\n")
+            self.emit_stmt(stmt.body)
         elif type == ast.STMT_EXPRESSION:
             self.write_indent()
             self.emit_expr(stmt.expression)
@@ -69,62 +62,38 @@ class SageToLilyTranspiler(Transpiler):
             self.write_indent()
             self.write("print(")
             self.emit_expr(stmt.expression)
-            self.write(")")
-            self.write(chr(10))
+            self.write(")\n")
         elif type == ast.STMT_IF:
             self.write_indent()
             self.write("if ")
             self.emit_expr(stmt.condition)
             self.write(":\n")
-            if type(stmt.then_branch) == "Array":
-                self.indent_level = self.indent_level + 1
-                for b_stmt in stmt.then_branch:
-                    self.emit_stmt(b_stmt)
-                self.indent_level = self.indent_level - 1
-            else:
-                self.emit_stmt(stmt.then_branch)
-            
+            self.emit_stmt(stmt.then_branch)
             if stmt.else_branch != nil:
                 self.write_indent()
                 self.write("else:\n")
-                if type(stmt.else_branch) == "Array":
-                    self.indent_level = self.indent_level + 1
-                    for b_stmt in stmt.else_branch:
-                        self.emit_stmt(b_stmt)
-                    self.indent_level = self.indent_level - 1
-                else:
-                    self.emit_stmt(stmt.else_branch)
+                self.emit_stmt(stmt.else_branch)
         elif type == ast.STMT_BLOCK:
             self.indent_level = self.indent_level + 1
-            for b_stmt in stmt.statements:
-                self.emit_stmt(b_stmt)
+            let curr = stmt.statements
+            while curr != nil:
+                self.emit_stmt(curr)
+                curr = curr.next
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_WHILE:
             self.write_indent()
             self.write("while ")
             self.emit_expr(stmt.condition)
             self.write(":\n")
-            if type(stmt.body) == "Array":
-                self.indent_level = self.indent_level + 1
-                for b_stmt in stmt.body:
-                    self.emit_stmt(b_stmt)
-                self.indent_level = self.indent_level - 1
-            else:
-                self.emit_stmt(stmt.body)
+            self.emit_stmt(stmt.body)
         elif type == ast.STMT_FOR:
             self.write_indent()
             self.write("for ")
-            self.write(stmt.variable)
+            self.write(stmt.variable.text)
             self.write(" in ")
             self.emit_expr(stmt.iterable)
             self.write(":\n")
-            if type(stmt.body) == "Array":
-                self.indent_level = self.indent_level + 1
-                for b_stmt in stmt.body:
-                    self.emit_stmt(b_stmt)
-                self.indent_level = self.indent_level - 1
-            else:
-                self.emit_stmt(stmt.body)
+            self.emit_stmt(stmt.body)
         elif type == ast.STMT_BREAK:
             self.write_indent()
             self.write("break\n")
@@ -134,14 +103,16 @@ class SageToLilyTranspiler(Transpiler):
         elif type == ast.STMT_CLASS:
             self.write_indent()
             self.write("class ")
-            self.write(stmt.name)
+            self.write(stmt.name.text)
             if stmt.has_parent:
                 self.write(" extends ")
-                self.write(stmt.parent)
+                self.write(stmt.parent.text)
             self.write(":\n")
             self.indent_level = self.indent_level + 1
-            for m in stmt.methods:
-                self.emit_stmt(m)
+            let curr = stmt.methods
+            while curr != nil:
+                self.emit_stmt(curr)
+                curr = curr.next
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_DEFER:
             self.write_indent()
@@ -150,35 +121,15 @@ class SageToLilyTranspiler(Transpiler):
         elif type == ast.STMT_TRY:
             self.write_indent()
             self.write("try:\n")
-            if type(stmt.try_block) == "Array":
-                self.indent_level = self.indent_level + 1
-                for b_stmt in stmt.try_block:
-                    self.emit_stmt(b_stmt)
-                self.indent_level = self.indent_level - 1
-            else:
-                self.emit_stmt(stmt.try_block)
-            
+            self.emit_stmt(stmt.try_block)
             for c in stmt.catches:
                 self.write_indent()
-                self.write("catch " + c.exception_var + ":\n")
-                if type(c.body) == "Array":
-                    self.indent_level = self.indent_level + 1
-                    for b_stmt in c.body:
-                        self.emit_stmt(b_stmt)
-                    self.indent_level = self.indent_level - 1
-                else:
-                    self.emit_stmt(c.body)
-                    
+                self.write("catch " + c.exception_var.text + ":\n")
+                self.emit_stmt(c.body)
             if stmt.finally_block != nil:
                 self.write_indent()
                 self.write("finally:\n")
-                if type(stmt.finally_block) == "Array":
-                    self.indent_level = self.indent_level + 1
-                    for b_stmt in stmt.finally_block:
-                        self.emit_stmt(b_stmt)
-                    self.indent_level = self.indent_level - 1
-                else:
-                    self.emit_stmt(stmt.finally_block)
+                self.emit_stmt(stmt.finally_block)
         elif type == ast.STMT_RAISE:
             self.write_indent()
             self.write("raise ")
@@ -210,50 +161,49 @@ class SageToLilyTranspiler(Transpiler):
                 self.write("\n")
         elif type == ast.STMT_ASYNC_PROC:
             self.write_indent()
-            self.write("async var func ")
-            self.write(stmt.name)
+            self.write("async func ")
+            self.write(stmt.name.text)
             self.write("(")
             let count = stmt.param_count
             for i in range(count):
-                self.write("var " + stmt.params[i])
+                self.write(stmt.params[i].text)
                 if i < count - 1:
                     self.write(", ")
             self.write("):\n")
-            self.indent_level = self.indent_level + 1
-            for b_stmt in stmt.body:
-                self.emit_stmt(b_stmt)
-            self.indent_level = self.indent_level - 1
+            self.emit_stmt(stmt.body)
         elif type == ast.STMT_STRUCT:
             self.write_indent()
             self.write("struct ")
-            self.write(stmt.name)
+            self.write(stmt.name.text)
             self.write(":\n")
             self.indent_level = self.indent_level + 1
             for i in range(stmt.field_count):
                 self.write_indent()
-                self.write("var " + stmt.field_names[i])
+                self.write("var " + stmt.field_names[i].text)
                 if stmt.field_types[i] != nil:
-                    self.write(": " + stmt.field_types[i])
+                    self.write(": " + stmt.field_types[i].text)
                 self.write("\n")
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_ENUM:
             self.write_indent()
             self.write("enum ")
-            self.write(stmt.name)
+            self.write(stmt.name.text)
             self.write(":\n")
             self.indent_level = self.indent_level + 1
             for i in range(stmt.variant_count):
                 self.write_indent()
-                self.write(stmt.variant_names[i] + "\n")
+                self.write(stmt.variant_names[i].text + "\n")
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_TRAIT:
             self.write_indent()
             self.write("trait ")
-            self.write(stmt.name)
+            self.write(stmt.name.text)
             self.write(":\n")
             self.indent_level = self.indent_level + 1
-            for m in stmt.methods:
-                self.emit_stmt(m)
+            let curr = stmt.methods
+            while curr != nil:
+                self.emit_stmt(curr)
+                curr = curr.next
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_MATCH:
             self.write_indent()
@@ -270,75 +220,70 @@ class SageToLilyTranspiler(Transpiler):
                     self.write(" if ")
                     self.emit_expr(c.guard)
                 self.write(":\n")
-                if type(c.body) == "Array":
-                    self.indent_level = self.indent_level + 1
-                    for b_stmt in c.body:
-                        self.emit_stmt(b_stmt)
-                    self.indent_level = self.indent_level - 1
-                else:
-                    self.emit_stmt(c.body)
+                self.emit_stmt(c.body)
             if stmt.default_case != nil:
                 self.write_indent()
                 self.write("default:\n")
-                if type(stmt.default_case) == "Array":
-                    self.indent_level = self.indent_level + 1
-                    for b_stmt in stmt.default_case:
-                        self.emit_stmt(b_stmt)
-                    self.indent_level = self.indent_level - 1
-                else:
-                    self.emit_stmt(stmt.default_case)
+                self.emit_stmt(stmt.default_case)
             self.indent_level = self.indent_level - 1
         elif type == ast.STMT_COMPTIME:
             self.write_indent()
             self.write("comptime:\n")
-            if type(stmt.body) == "Array":
-                self.indent_level = self.indent_level + 1
-                for b_stmt in stmt.body:
-                    self.emit_stmt(b_stmt)
-                self.indent_level = self.indent_level - 1
-            else:
-                self.emit_stmt(stmt.body)
+            self.emit_stmt(stmt.body)
         elif type == ast.STMT_MACRO_DEF:
             self.write_indent()
             self.write("macro ")
-            self.write(stmt.name)
+            self.write(stmt.name.text)
             self.write("(")
             let count = stmt.param_count
             for i in range(count):
-                self.write("var " + stmt.params[i])
+                self.write("var " + stmt.params[i].text)
                 if i < count - 1:
                     self.write(", ")
             self.write("):\n")
-            self.indent_level = self.indent_level + 1
-            for b_stmt in stmt.body:
-                self.emit_stmt(b_stmt)
-            self.indent_level = self.indent_level - 1
+            self.emit_stmt(stmt.body)
         else:
             self.write_indent()
-            self.write("// TODO: Unhandled stmt type " + str(type))
+            self.write("// TODO stmt type " + str(type))
             self.write(chr(10))
 
-    proc emit_expr(self, expr: Object):
+    proc emit_expr(self, expr):
+        if expr == nil:
+            return
         let type = expr.type
         if type == ast.EXPR_NUMBER:
             self.write(str(expr.value))
         elif type == ast.EXPR_STRING:
             self.write(chr(34) + expr.value + chr(34))
         elif type == ast.EXPR_VARIABLE:
-            self.write(expr.name)
+            self.write(expr.name.text)
         elif type == ast.EXPR_BINARY:
             self.emit_expr(expr.left)
-            self.write(" " + expr.op + " ")
+            self.write(" " + expr.op.text + " ")
             self.emit_expr(expr.right)
         elif type == ast.EXPR_CALL:
-            self.emit_expr(expr.callee)
-            self.write("(")
-            let count = len(expr.args)
-            for i in range(count):
-                self.emit_expr(expr.args[i])
-                if i < count - 1:
-                    self.write(", ")
-            self.write(")")
+            let is_ptr = false
+            let is_addr = false
+            if expr.callee.type == ast.EXPR_VARIABLE and expr.callee.name.text == "__deref__":
+                is_ptr = true
+            elif expr.callee.type == ast.EXPR_VARIABLE and expr.callee.name.text == "__addr__":
+                is_addr = true
+            
+            if is_ptr:
+                self.write("ptr ")
+                self.emit_expr(expr.args[0])
+            elif is_addr:
+                self.write("addr ")
+                self.emit_expr(expr.args[0])
+            else:
+                self.emit_expr(expr.callee)
+                self.write("(")
+                let count = len(expr.args)
+                for i in range(count):
+                    self.emit_expr(expr.args[i])
+                    if i < count - 1:
+                        self.write(", ")
+                self.write(")")
         elif type == ast.EXPR_BOOL:
             if expr.value:
                 self.write("true")
@@ -380,11 +325,11 @@ class SageToLilyTranspiler(Transpiler):
         elif type == ast.EXPR_GET:
             self.emit_expr(expr.object)
             self.write(".")
-            self.write(expr.property)
+            self.write(expr.property.text)
         elif type == ast.EXPR_SET:
             self.emit_expr(expr.object)
             self.write(".")
-            self.write(expr.property)
+            self.write(expr.property.text)
             self.write(" = ")
             self.emit_expr(expr.value)
         elif type == ast.EXPR_TUPLE:
@@ -411,11 +356,10 @@ class SageToLilyTranspiler(Transpiler):
             self.emit_expr(expr.expression)
         elif type == ast.EXPR_SUPER:
             self.write("super.")
-            self.write(expr.method)
+            self.write(expr.method.text)
         elif type == ast.EXPR_COMPTIME:
             self.write("comptime(")
             self.emit_expr(expr.expression)
             self.write(")")
         else:
             self.write("/* unhandled expr type " + str(type) + " */")
-

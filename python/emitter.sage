@@ -1,8 +1,7 @@
 from transpiler.base import Transpiler
 
 class SageEmitter(Transpiler):
-    proc emit(node: Object) -> String:
-        if node["type"] == "Module":
+    proc emit(node) -> String node["type"] == "Module":
             let code = ""
             for child in node["body"]:
                 code = code + self.emit(child) + "\n"
@@ -15,7 +14,7 @@ class SageEmitter(Transpiler):
             
         elif node["type"] == "FunctionDef":
             let name = node["name"]
-            # Minimalist: no args/types yet
+            # Minimalist args/types yet
             return "proc " + name + "():"
             
         elif node["type"] == "While":
@@ -29,7 +28,7 @@ class SageEmitter(Transpiler):
             let target = self.emit(node["target"])
             let op = node["op"]["type"] # Simplification
             let value = self.emit(node["value"])
-            # Mapping AugAssign to Assignment for simplicity: x -= 1 -> x = x - 1
+            # Mapping AugAssign to Assignment for simplicity -= 1 -> x = x - 1
             let op_str = " + "
             if op == "Sub":
                 op_str = " - "
@@ -39,25 +38,23 @@ class SageEmitter(Transpiler):
             let elts = ""
             for i in range(len(node["elts"])):
                 elts = elts + self.emit(node["elts"][i])
-                if i < len(node["elts"]) - 1: elts = elts + ", "
+                if i < len(node["elts"]) - 1 = elts + ", "
             if node["type"] == "List":
                 return "[" + elts + "]"
-            else:
-                return "(" + elts + ")"
+            else "(" + elts + ")"
             
         elif node["type"] == "Dict":
             let pairs = ""
             for i in range(len(node["keys"])):
                 pairs = pairs + self.emit(node["keys"][i]) + ": " + self.emit(node["values"][i])
-                if i < len(node["keys"]) - 1: pairs = pairs + ", "
+                if i < len(node["keys"]) - 1 = pairs + ", "
             return "{" + pairs + "}"
             
         elif node["type"] == "Call":
             let func = self.emit(node["func"])
-            # Simplified: just handle one argument if present
+            # Simplified handle one argument if present
             let args = ""
-            if len(node["args"]) > 0:
-                args = self.emit(node["args"][0])
+            if len(node["args"]) > 0 = self.emit(node["args"][0])
             return func + "(" + args + ")"
             
         elif node["type"] == "Name":
@@ -66,5 +63,4 @@ class SageEmitter(Transpiler):
         elif node["type"] == "Constant":
             return str(node["value"])
             
-        else:
-            return "/* Unsupported: " + node["type"] + " */"
+        else "/* Unsupported: " + node["type"] + " */"

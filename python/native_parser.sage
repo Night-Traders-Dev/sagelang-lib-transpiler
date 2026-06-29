@@ -1,8 +1,8 @@
 from transpiler.base import Transpiler
 
 class SageNativeParser(Transpiler):
-    proc parse(source: String) -> Object:
-        # Initial scaffold: return a mock AST
+    proc parse(source) :
+        # Initial scaffold a mock AST
         return {
             "type": "Module",
             "body": [
