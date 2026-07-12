@@ -1,6 +1,6 @@
 # Sage ↔ Lily Transpiler Specification
 
-> **Sage version:** 3.9.7 / Spec 2.0  
+> **Sage version:** 4.0.4 / Spec 2.0  
 > **Lily version:** 0.1.0-draft  
 > **Spec version:** 1.0.0  
 > **Authors:** Night-Traders-Dev / MilkmanAbi collaboration
