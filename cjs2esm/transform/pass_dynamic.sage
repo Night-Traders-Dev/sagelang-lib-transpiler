@@ -38,14 +38,11 @@ proc cjs_dynamic_report(source):
                     report["dynamic"] = report["dynamic"] + 1
                     index = index + 1
             else:
+                let dot = cjs_code_token_at(code, index + 1)
+                let cache = cjs_code_token_at(code, index + 2)
+                if dot != nil and dot.kind == "punct" and dot.raw == "." and cache != nil and cache.kind == "word" and cache.raw == "cache":
+                    report["cache"] = report["cache"] + 1
                 index = index + 1
-        elif token_value.kind == "keyword" and token_value.raw == "delete":
-            let target = cjs_code_token_at(code, index + 1)
-            let dot = cjs_code_token_at(code, index + 2)
-            let cache = cjs_code_token_at(code, index + 3)
-            if target != nil and target.kind == "word" and target.raw == "require" and dot != nil and dot.kind == "punct" and dot.raw == "." and cache != nil and cache.kind == "word" and cache.raw == "cache":
-                report["cache"] = report["cache"] + 1
-            index = index + 1
         else:
             index = index + 1
     return report
@@ -225,47 +222,102 @@ proc cjs_dyn_block_owner(code, open_index):
     return result
 
 proc cjs_dyn_arrow_is_async(code, arrow_index):
-    var position = arrow_index - 1
-    var depth = 0
-    while position >= 0:
-        let token_value = code[position]
-        if token_value.kind == "punct":
-            if token_value.raw == ")" or token_value.raw == "]" or token_value.raw == "}":
-                depth = depth + 1
-            elif token_value.raw == "(" or token_value.raw == "[" or token_value.raw == "{":
-                if depth == 0:
-                    let before = cjs_code_token_at(code, position - 1)
-                    if before != nil and before.kind == "word" and before.raw == "async":
-                        return true
-                    return false
-                depth = depth - 1
-            elif token_value.raw == "=>" or token_value.raw == ";" or token_value.raw == "{" or token_value.raw == "}":
-                if depth == 0:
-                    return false
-        elif token_value.kind == "word" and token_value.raw == "async" and depth == 0:
+    let previous = cjs_code_token_at(code, arrow_index - 1)
+    if previous == nil:
+        return false
+    if previous.kind == "punct" and previous.raw == ")":
+        let open_paren = cjs_dyn_match_opening(code, arrow_index - 1)
+        if open_paren >= 0:
+            let before = cjs_code_token_at(code, open_paren - 1)
+            if before != nil and before.kind == "word" and before.raw == "async":
+                return true
+        return false
+    if previous.kind == "word" and previous.raw == "async":
+        return true
+    if previous.kind == "word":
+        let before = cjs_code_token_at(code, arrow_index - 2)
+        if before != nil and before.kind == "word" and before.raw == "async":
             return true
-        elif token_value.kind == "keyword" and depth == 0:
-            return false
-        position = position - 1
     return false
 
 proc cjs_dyn_await_valid(code, index):
-    var depth = 0
-    var position = index - 1
-    while position >= 0:
+    let contexts = []
+    let delimiters = []
+    var position = 0
+    while position < index:
         let token_value = code[position]
-        if cjs_dyn_is_closer(token_value):
-            depth = depth + 1
-        elif cjs_dyn_is_opener(token_value):
-            if depth == 0:
-                if token_value.raw == "{":
-                    let owner = cjs_dyn_block_owner(code, position)
-                    if owner["function"]:
-                        return owner["async"]
-            else:
-                depth = depth - 1
-        position = position - 1
+        if cjs_dyn_is_opener(token_value):
+            if token_value.raw == "{":
+                let owner = cjs_dyn_block_owner(code, position)
+                if owner["function"]:
+                    let context = {}
+                    context["kind"] = "function"
+                    context["async"] = owner["async"]
+                    context["stack_len"] = len(delimiters)
+                    push(contexts, context)
+            push(delimiters, token_value)
+        elif cjs_dyn_is_closer(token_value):
+            if len(delimiters) > 0:
+                pop(delimiters)
+            let stack_len = len(delimiters)
+            while len(contexts) > 0:
+                let context = contexts[len(contexts) - 1]
+                if context["kind"] == "arrow" and context["stack_len"] > stack_len:
+                    pop(contexts)
+                elif context["kind"] == "function" and context["stack_len"] >= stack_len:
+                    pop(contexts)
+                else:
+                    break
+        elif token_value.kind == "punct" and token_value.raw == "=>":
+            let context = {}
+            context["kind"] = "arrow"
+            context["async"] = cjs_dyn_arrow_is_async(code, position)
+            context["stack_len"] = len(delimiters)
+            push(contexts, context)
+        elif token_value.kind == "punct" and (token_value.raw == ";" or token_value.raw == ","):
+            let stack_len = len(delimiters)
+            while len(contexts) > 0:
+                let context = contexts[len(contexts) - 1]
+                if context["kind"] == "arrow" and context["stack_len"] == stack_len:
+                    pop(contexts)
+                else:
+                    break
+        position = position + 1
+    var context_index = len(contexts) - 1
+    while context_index >= 0:
+        if contexts[context_index]["kind"] == "arrow" or contexts[context_index]["kind"] == "function":
+            return contexts[context_index]["async"]
+        context_index = context_index - 1
     return true
+
+proc cjs_dyn_range_has_path_call(code, start, stop):
+    var index = start
+    while index + 2 < stop:
+        let token_value = code[index]
+        let dot = code[index + 1]
+        let member = code[index + 2]
+        if token_value.kind == "word" and token_value.raw == "path" and dot.kind == "punct" and dot.raw == "." and member.kind == "word" and (member.raw == "join" or member.raw == "resolve"):
+            return true
+        index = index + 1
+    return false
+
+proc cjs_dyn_argument_may_be_path(code, require_index, call_stop, args):
+    if cjs_dyn_range_has_path_call(code, require_index + 2, call_stop):
+        return true
+    if len(args) != 1 or args[0].kind != "word":
+        return false
+    let name = args[0].raw
+    var index = 0
+    while index < require_index:
+        let token_value = code[index]
+        if token_value.kind == "word" and token_value.raw == name:
+            let assign = cjs_code_token_at(code, index + 1)
+            let declaration = cjs_code_token_at(code, index - 1)
+            if assign != nil and assign.kind == "punct" and assign.raw == "=" and declaration != nil and declaration.kind == "keyword" and (declaration.raw == "const" or declaration.raw == "let" or declaration.raw == "var"):
+                if cjs_dyn_range_has_path_call(code, index + 2, require_index):
+                    return true
+        index = index + 1
+    return false
 
 proc cjs_dyn_rewritable_calls(code):
     let calls = []
@@ -291,6 +343,9 @@ proc cjs_dyn_rewritable_calls(code):
                             entry["stop"] = code[call["stop"] - 1].end
                             entry["arg_start"] = args[0].start
                             entry["arg_stop"] = args[len(args) - 1].end
+                            entry["arguments"] = args
+                            entry["require_index"] = index
+                            entry["stop_index"] = call["stop"]
                             entry["line"] = token_value.line
                             push(calls, entry)
                     index = call["stop"]

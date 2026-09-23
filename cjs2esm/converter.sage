@@ -7,7 +7,7 @@ from lexer.js_scanner import js_scan_source
 from lexer.js_token import js_is_code_token
 from printer.sourcemap import cjs_build_source_map, cjs_count_lines
 from resolver.path_resolver import resolve_import_path
-from transform.pass_dynamic import cjs_dyn_rewritable_calls
+from transform.pass_dynamic import cjs_dyn_argument_may_be_path, cjs_dyn_rewritable_calls
 
 proc cjs_text_in_list(text, values):
     var index = 0
@@ -38,6 +38,13 @@ proc cjs_is_valid_export_name(text):
         if not is_js_identifier_part_simple(text[index]):
             return false
         index = index + 1
+    return true
+
+proc cjs_is_valid_named_export_name(text):
+    if not cjs_is_valid_export_name(text):
+        return false
+    if text == "default" or cjs_is_keyword_text(text):
+        return false
     return true
 
 proc is_js_identifier_start_simple(value):
@@ -182,6 +189,8 @@ proc cjs_empty_analysis():
     analysis["dynamic_require_count"] = 0
     analysis["static_require_count"] = 0
     analysis["has_cache_operation"] = false
+    analysis["needs_import_helper"] = false
+    analysis["import_helper_name"] = ""
     analysis["exports_final_names"] = []
     analysis["exports_object_names"] = []
     analysis["exports_shorthand_names"] = []
@@ -204,6 +213,24 @@ proc cjs_fail(analysis, code, message, line):
     analysis["message"] = message
     cjs_add_diagnostic(analysis, code, message, "ERROR", line)
     return analysis
+
+proc cjs_validate_strict_analysis(analysis):
+    if analysis["dynamic_require_count"] > 0:
+        cjs_fail(analysis, "CJS201", "Strict mode rejects dynamic require calls because they require asynchronous or compatibility semantics.", 1)
+        return false
+    if analysis["has_cache_operation"]:
+        cjs_fail(analysis, "CJS201", "Strict mode rejects require.cache access because ESM has no native cache eviction API.", 1)
+        return false
+    if analysis["needs_require"]:
+        cjs_fail(analysis, "CJS201", "Strict mode only permits leading static requires that can be represented as ESM imports.", 1)
+        return false
+    if analysis["needs_module"]:
+        cjs_fail(analysis, "CJS201", "Strict mode rejects CommonJS module and exports shims.", 1)
+        return false
+    if analysis["needs_filename"] or analysis["needs_dirname"] or analysis["needs_process"]:
+        cjs_fail(analysis, "CJS201", "Strict mode rejects CommonJS runtime global shims.", 1)
+        return false
+    return true
 
 proc cjs_mark_top_declaration(analysis, name, line):
     if name == nil or name == "":
@@ -816,11 +843,16 @@ proc cjs_count_plan_locals(plans):
 
 proc cjs_emit_import_plan(plan, analysis):
     if plan["json"]:
-        push(analysis["imports"], "import " + plan["temp"] + " from " + chr(34) + plan["source"] + chr(34) + " with { type: " + chr(34) + "json" + chr(34) + " };")
-        if plan["kind"] == "default":
-            push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + ";")
+        if plan["kind"] == "side_effect":
+            push(analysis["imports"], "import " + chr(34) + plan["source"] + chr(34) + " with { type: " + chr(34) + "json" + chr(34) + " };")
         else:
-            push(analysis["import_prologue_extra"], "const { " + cjs_format_destructuring(plan["pairs"]) + " } = " + plan["temp"] + ";")
+            push(analysis["imports"], "import " + plan["temp"] + " from " + chr(34) + plan["source"] + chr(34) + " with { type: " + chr(34) + "json" + chr(34) + " };")
+            if plan["kind"] == "default":
+                push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + ";")
+            elif plan["kind"] == "property":
+                push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + "." + plan["property"] + ";")
+            else:
+                push(analysis["import_prologue_extra"], "const { " + cjs_format_destructuring(plan["pairs"]) + " } = " + plan["temp"] + ";")
     elif plan["temp"] != "":
         push(analysis["imports"], "import " + plan["temp"] + " from " + chr(34) + plan["source"] + chr(34) + ";")
         if plan["kind"] == "default":
@@ -965,18 +997,16 @@ proc cjs_parse_import_declarator(code, index, analysis, base_directory, line):
     plan["temp"] = ""
     if kind == "default" and plan["property"] == "":
         plan["kind"] = "default"
+        if plan["json"]:
+            plan["temp"] = cjs_unique_import_temp(analysis, "__cjs_module_")
     elif kind == "default":
-        if cjs_is_bare_specifier(display) or cjs_starts_with(display, "node:"):
-            plan["kind"] = "property"
-        else:
-            plan["kind"] = "property"
+        plan["kind"] = "property"
+        if plan["json"] or not cjs_is_bare_specifier(display):
             plan["temp"] = cjs_unique_import_temp(analysis, "__cjs_module_")
     else:
+        plan["kind"] = "named"
         if plan["json"] or not cjs_is_bare_specifier(display):
-            plan["kind"] = "named"
             plan["temp"] = cjs_unique_import_temp(analysis, "__cjs_module_")
-        else:
-            plan["kind"] = "named"
     plan["stop"] = details["stop"]
     plan["ok"] = true
     return plan
@@ -1099,7 +1129,7 @@ proc cjs_parse_side_effect_require(code, index, analysis, base_directory):
     plan["pairs"] = []
     plan["source"] = display
     plan["property"] = ""
-    plan["json"] = false
+    plan["json"] = cjs_ends_with(display, ".json")
     plan["temp"] = ""
     plan["line"] = code[index].line
     cjs_emit_import_plan(plan, analysis)
@@ -1308,17 +1338,26 @@ proc cjs_replace_runtime_names(code, analysis):
         index = index + 1
     return true
 
+proc cjs_source_uses_require(source):
+    let scan = js_scan_source(source)
+    var index = 0
+    while index < len(scan["tokens"]):
+        let token_value = scan["tokens"][index]
+        if js_is_code_token(token_value) and token_value.kind == "word" and token_value.raw == "require":
+            return true
+        index = index + 1
+    return false
+
 proc cjs_analyze_cache_operations(code, analysis):
     var index = 0
     while index < len(code):
         let token_value = code[index]
-        if token_value.kind == "keyword" and token_value.raw == "delete":
-            let target = cjs_code_token_at(code, index + 1)
-            let dot = cjs_code_token_at(code, index + 2)
-            let cache = cjs_code_token_at(code, index + 3)
-            if target != nil and target.kind == "word" and target.raw == "require" and dot != nil and dot.kind == "punct" and dot.raw == "." and cache != nil and cache.kind == "word" and cache.raw == "cache":
+        if token_value.kind == "word" and token_value.raw == "require":
+            let dot = cjs_code_token_at(code, index + 1)
+            let cache = cjs_code_token_at(code, index + 2)
+            if dot != nil and dot.kind == "punct" and dot.raw == "." and cache != nil and cache.kind == "word" and cache.raw == "cache":
                 analysis["has_cache_operation"] = true
-                cjs_add_diagnostic(analysis, "CJS202", "require.cache manipulation preserved on createRequire at line " + str(token_value.line) + " [MANUAL_REVIEW].", "WARNING", token_value.line)
+                cjs_add_diagnostic(analysis, "CJS202", "require.cache access preserved on createRequire at line " + str(token_value.line) + " [MANUAL_REVIEW].", "WARNING", token_value.line)
         index = index + 1
     return true
 
@@ -1576,6 +1615,11 @@ proc cjs_build_output(source, body, analysis):
     while extra_index < len(analysis["import_prologue_extra"]):
         prologue = prologue + analysis["import_prologue_extra"][extra_index] + newline
         extra_index = extra_index + 1
+    if analysis["needs_import_helper"]:
+        prologue = prologue + "const " + analysis["import_helper_name"] + " = async (specifier) => {" + newline
+        prologue = prologue + "  const namespace = await import(specifier);" + newline
+        prologue = prologue + "  return namespace.default ?? namespace;" + newline
+        prologue = prologue + "};" + newline
     if analysis["needs_require"]:
         prologue = prologue + "import { createRequire } from " + chr(34) + "node:module" + chr(34) + ";" + newline
     if analysis["needs_filename"] or analysis["needs_dirname"] or analysis["needs_process"]:
@@ -1592,7 +1636,7 @@ proc cjs_build_output(source, body, analysis):
         prologue = prologue + "const __dirname = dirname(__filename);" + newline
     if analysis["needs_module"]:
         prologue = prologue + "const module = { exports: {} };" + newline
-        prologue = prologue + "const exports = module.exports;" + newline
+        prologue = prologue + "let exports = module.exports;" + newline
     if prologue != "":
         prologue = prologue + newline
     analysis["prologue_newlines"] = cjs_newline_count(prologue)
@@ -1602,12 +1646,15 @@ proc cjs_build_output(source, body, analysis):
         var name_index = 0
         while name_index < len(analysis["exports_final_names"]):
             let export_name = analysis["exports_final_names"][name_index]
-            if (cjs_text_in_list(export_name, analysis["exports_shorthand_names"]) or cjs_text_in_list(export_name, analysis["exports_spec_names"])) and dict_has(analysis["declared_top"], export_name):
-                footer = footer + "export { " + export_name + " };" + newline
-            elif dict_has(analysis["declared_top"], export_name):
-                return cjs_fail(analysis, "CJS401", "Export name collides with an existing top-level binding.", 1)
+            if cjs_is_valid_named_export_name(export_name):
+                if (cjs_text_in_list(export_name, analysis["exports_shorthand_names"]) or cjs_text_in_list(export_name, analysis["exports_spec_names"])) and dict_has(analysis["declared_top"], export_name):
+                    footer = footer + "export { " + export_name + " };" + newline
+                elif dict_has(analysis["declared_top"], export_name):
+                    return cjs_fail(analysis, "CJS401", "Export name collides with an existing top-level binding.", 1)
+                else:
+                    footer = footer + "export const " + export_name + " = module.exports." + export_name + ";" + newline
             else:
-                footer = footer + "export const " + export_name + " = module.exports." + export_name + ";" + newline
+                cjs_add_diagnostic(analysis, "CJS402", "Named export '" + export_name + "' is reserved and was not synthesized.", "WARNING", 1)
             name_index = name_index + 1
     if cjs_starts_with(source, "#!"):
         var split = 0
@@ -1636,12 +1683,18 @@ proc cjs_rewrite_dynamic_imports(source, code, analysis):
     var index = 0
     while index < len(calls):
         let call = calls[index]
-        if not cjs_span_overlaps_removals(analysis, call["start"], call["stop"]):
+        if cjs_dyn_argument_may_be_path(code, call["require_index"], call["stop_index"], call["arguments"]):
+            index = index + 1
+        elif not cjs_span_overlaps_removals(analysis, call["start"], call["stop"]):
             let inner = slice(source, call["arg_start"], call["arg_stop"])
-            cjs_add_replacement(analysis, call["start"], call["stop"], "(await import(" + inner + ")).default ?? (await import(" + inner + "))", call["line"])
+            if analysis["import_helper_name"] == "":
+                analysis["import_helper_name"] = cjs_unique_import_temp(analysis, "__cjs_import_")
+            let helper = "await " + analysis["import_helper_name"] + "(" + inner + ")"
+            cjs_add_replacement(analysis, call["start"], call["stop"], helper, call["line"])
             cjs_remove_reference(analysis, "require")
             if not dict_has(analysis["references"], "require") or analysis["references"]["require"] == 0:
                 analysis["needs_require"] = false
+            analysis["needs_import_helper"] = true
             cjs_add_diagnostic(analysis, "CJS203", "Dynamic require rewritten to await import at line " + str(call["line"]) + ". The argument must be a valid module specifier or file URL [SEMANTIC_CHANGE].", "NOTE", call["line"])
         index = index + 1
     return true
@@ -1654,10 +1707,10 @@ proc convert_cjs_text(source, target, mode, input_path = "", rewrite_dynamic = f
         failure["code"] = ""
         failure["diagnostics"] = []
         return failure
-    if mode != "compat" and mode != "discord":
+    if mode != "compat" and mode != "discord" and mode != "strict":
         let failure = {}
         failure["ok"] = false
-        failure["message"] = "Only compat and discord modes are implemented in this converter version."
+        failure["message"] = "Use compat, discord, or strict mode."
         failure["code"] = ""
         failure["diagnostics"] = []
         return failure
@@ -1720,6 +1773,13 @@ proc convert_cjs_text(source, target, mode, input_path = "", rewrite_dynamic = f
         failure["code"] = ""
         failure["diagnostics"] = analysis["diagnostics"]
         return failure
+    if mode == "strict" and not cjs_validate_strict_analysis(analysis):
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = analysis["message"]
+        failure["code"] = ""
+        failure["diagnostics"] = analysis["diagnostics"]
+        return failure
     if rewrite_dynamic:
         cjs_rewrite_dynamic_imports(source, code, analysis)
         if not analysis["ok"]:
@@ -1763,6 +1823,18 @@ proc convert_cjs_file(input_path, output_path, target, mode, want_map = false, r
         failure["message"] = "Input file could not be read."
         failure["code"] = ""
         failure["diagnostics"] = []
+        return failure
+    if path_dirname(input_path) != path_dirname(output_path) and cjs_source_uses_require(source):
+        let diagnostic = {}
+        diagnostic["code"] = "CJS405"
+        diagnostic["message"] = "Moving a file with require() outside its source directory is unsupported because relative resolution would change."
+        diagnostic["severity"] = "ERROR"
+        diagnostic["line"] = 1
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = diagnostic["message"]
+        failure["code"] = ""
+        failure["diagnostics"] = [diagnostic]
         return failure
     let converted = convert_cjs_text(source, target, mode, input_path, rewrite_dynamic)
     if not converted["ok"]:

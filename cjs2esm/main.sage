@@ -13,7 +13,7 @@ from project.workspace import cjs_analyze_project
 
 proc cjs_print_usage():
     print "Usage:"
-    print "  cjs2esm convert <input.cjs> [--out <file.mjs|dir>] [--target node18|node20|node22|node24] [--mode compat|discord] [--source-maps] [--update-package-json] [--rewrite-dynamic-imports] [--dry-run]"
+    print "  cjs2esm convert <input.cjs> [--out <file.mjs|dir>] [--target node18|node20|node22|node24] [--mode compat|discord|strict] [--source-maps] [--update-package-json] [--rewrite-dynamic-imports] [--dry-run]"
     print "  cjs2esm inspect <input.cjs>"
     print "  cjs2esm check <path>"
     print "  cjs2esm report <path> [--out <report.md>]"
@@ -127,7 +127,7 @@ proc cjs_execute_convert(args):
         if source == nil:
             print "Input file could not be read."
             return 1
-        let converted = convert_cjs_text(source, target, mode)
+        let converted = convert_cjs_text(source, target, mode, input_path, rewrite_dynamic)
         if not converted["ok"]:
             print converted["message"]
             cjs_print_diagnostics(converted["diagnostics"])

@@ -7,7 +7,7 @@ proc cjs_supported_targets():
     return ["node18", "node20", "node22", "node24"]
 
 proc cjs_supported_modes():
-    return ["compat", "discord"]
+    return ["compat", "discord", "strict"]
 
 proc cjs_empty_diagnostics():
     return []

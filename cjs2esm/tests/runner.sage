@@ -27,7 +27,19 @@ from cjs2esm.ast.declarations import js_export_default, js_export_named, js_func
 from cjs2esm.ast.visitor import js_visit_kinds
 from cjs2esm.printer.comments import cjs_is_line_comment
 from cjs2esm.project.reporter import cjs_markdown_report, cjs_report_summary
-from cjs2esm.project.workspace import cjs_analyze_project, cjs_list_inputs
+from cjs2esm.project.workspace import cjs_analyze_project, cjs_list_inputs, cjs_project_output_path
+
+proc cjs_test_contains(text, needle):
+    if needle == "":
+        return true
+    if len(text) < len(needle):
+        return false
+    var start = 0
+    while start + len(needle) <= len(text):
+        if slice(text, start, start + len(needle)) == needle:
+            return true
+        start = start + 1
+    return false
 
 proc cjs_find_token(tokens, kind, raw):
     var index = 0
@@ -93,6 +105,15 @@ proc test_object_export_names():
     testing.assert_true(slash_result["ok"], "slash conversion")
     testing.assert_contains(slash_result["code"], "export const data = module.exports.data;", "data export")
     testing.assert_contains(slash_result["code"], "export const execute = module.exports.execute;", "execute export")
+
+proc test_reserved_export_and_exports_reassignment():
+    let reserved = convert_cjs_text("exports.default = 1;" + chr(10), "node20", "compat")
+    testing.assert_true(reserved["ok"], "reserved export conversion")
+    testing.assert_false(cjs_test_contains(reserved["code"], "export const default"), "reserved export is not synthesized")
+    let reassigned = convert_cjs_text("exports = {};" + chr(10) + "console.log(\"ok\");" + chr(10), "node20", "compat")
+    testing.assert_true(reassigned["ok"], "exports reassignment conversion")
+    testing.assert_contains(reassigned["code"], "let exports = module.exports;", "exports binding is mutable")
+    testing.assert_contains(reassigned["code"], "exports = {};", "exports reassignment preserved")
 
 proc test_json_require_wrapper():
     let source = "const config = require(\"./config.json\");" + chr(10) + "module.exports = config;" + chr(10)
@@ -164,7 +185,18 @@ proc test_transform_context():
     testing.assert_true(cjs_validate_target("node20"), "supported target")
     testing.assert_false(cjs_validate_target("node16"), "unsupported target")
     testing.assert_true(cjs_validate_mode("compat"), "supported mode")
-    testing.assert_false(cjs_validate_mode("strict"), "unsupported mode")
+    testing.assert_true(cjs_validate_mode("strict"), "strict mode supported")
+
+proc test_strict_mode():
+    let safe = convert_cjs_text("const { Client } = require(\"discord.js\");" + chr(10) + "console.log(Client);" + chr(10), "node20", "strict")
+    testing.assert_true(safe["ok"], "strict static import")
+    testing.assert_contains(safe["code"], "import { Client } from \"discord.js\";", "strict static import output")
+    let ordered = convert_cjs_text("console.log(\"before\");" + chr(10) + "const client = require(\"discord.js\");" + chr(10), "node20", "strict")
+    testing.assert_false(ordered["ok"], "strict order rejection")
+    testing.assert_equal(ordered["diagnostics"][len(ordered["diagnostics"]) - 1]["code"], "CJS201", "strict order diagnostic")
+    let dynamic = convert_cjs_text("const client = require(name);" + chr(10), "node20", "strict")
+    testing.assert_false(dynamic["ok"], "strict dynamic rejection")
+    testing.assert_equal(dynamic["diagnostics"][len(dynamic["diagnostics"]) - 1]["code"], "CJS201", "strict dynamic diagnostic")
 
 proc test_import_plan_helpers():
     testing.assert_equal(cjs_static_import_text("discord.js", "discord"), "import discord from \"discord.js\";", "default import")
@@ -204,6 +236,12 @@ proc test_package_file_update():
     testing.assert_true(updated["ok"], "package file update")
     testing.assert_true(updated["changed"], "package file changed")
     testing.assert_contains(io.readfile("/tmp/opencode/cjs2esm-package.json"), chr(34) + "type" + chr(34) + ": " + chr(34) + "module" + chr(34), "package module type")
+
+proc test_output_relocation_rejected():
+    let input_path = "core/lib/transpiler/cjs2esm/tests/fixtures/json/json_import.cjs"
+    let result = convert_cjs_file(input_path, "/tmp/opencode/cjs2esm-relocated/json_import.mjs", "node20", "compat")
+    testing.assert_false(result["ok"], "relocated require rejection")
+    testing.assert_equal(result["diagnostics"][0]["code"], "CJS405", "relocation diagnostic")
 
 proc test_expression_precedence():
     let parsed = parse_expression_text("1 + 2 * 3")
@@ -297,6 +335,21 @@ proc test_workspace_reporter():
     let summary = cjs_report_summary(results)
     testing.assert_equal(summary["passed"] + summary["failed"], len(results), "summary total")
 
+proc test_workspace_recursive_paths():
+    let root = "/tmp/opencode/cjs2esm-workspace"
+    let nested = path_join(root, "commands")
+    if not io.exists(root):
+        io.mkdir(root)
+    if not io.exists(nested):
+        io.mkdir(nested)
+    io.writefile(path_join(root, "index.cjs"), "module.exports = {};" + chr(10))
+    io.writefile(path_join(nested, "ping.cjs"), "module.exports = {};" + chr(10))
+    let inputs = cjs_list_inputs(root)
+    testing.assert_equal(len(inputs), 2, "recursive workspace input count")
+    testing.assert_equal(cjs_project_output_path(path_join(nested, "ping.cjs"), root, "dist"), "dist/commands/ping.mjs", "nested output path")
+    let results = cjs_analyze_project(root, "node20", "compat")
+    testing.assert_equal(len(results), 2, "recursive workspace result count")
+
 proc test_secret_redaction():
     let token = "Maaaaaaaaaaaaaaaaaaaaaaa.abcdef.abcdefghijklmnopqrstuvwxyz0"
     testing.assert_equal(cjs_redact_secrets("saw " + token + " here"), "saw [REDACTED] here", "token redacted")
@@ -306,7 +359,9 @@ proc test_async_rewrite():
     let source = "async function load(name) {" + chr(10) + "  const helper = require(name);" + chr(10) + "  return helper;" + chr(10) + "}" + chr(10)
     let result = convert_cjs_text(source, "node20", "compat", "", true)
     testing.assert_true(result["ok"], "async rewrite conversion")
-    testing.assert_contains(result["code"], "(await import(name)).default ?? (await import(name))", "await import rewrite")
+    testing.assert_contains(result["code"], "const __cjs_import_0 = async (specifier) =>", "import helper")
+    testing.assert_contains(result["code"], "await __cjs_import_0(name)", "await import rewrite")
+    testing.assert_contains(result["code"], "return namespace.default ?? namespace;", "single import interop")
 
 proc test_sync_require_preserved_with_rewrite_flag():
     let source = "function load(name) {" + chr(10) + "  return require(name);" + chr(10) + "}" + chr(10) + "module.exports = { load };" + chr(10)
@@ -319,7 +374,81 @@ proc test_top_level_rewrite():
     let source = "const name = \"./helper3.cjs\";" + chr(10) + "const helper = require(name);" + chr(10) + "console.log(helper(\"ann\"));" + chr(10)
     let result = convert_cjs_text(source, "node20", "compat", "", true)
     testing.assert_true(result["ok"], "top-level rewrite conversion")
-    testing.assert_contains(result["code"], "(await import(name)).default ?? (await import(name))", "top-level rewrite")
+    testing.assert_contains(result["code"], "const __cjs_import_0 = async (specifier) =>", "top-level import helper")
+    testing.assert_contains(result["code"], "await __cjs_import_0(name)", "top-level rewrite")
+
+proc test_sync_arrow_preserved():
+    let source = "const load = (name) => require(name);" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "sync arrow conversion")
+    testing.assert_contains(result["code"], "const load = (name) => require(name);", "sync arrow preserved")
+    testing.assert_contains(result["code"], "const require = createRequire(import.meta.url);", "sync arrow shim")
+
+proc test_async_arrow_rewritten():
+    let source = "const load = async (name) => require(name);" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "async arrow conversion")
+    testing.assert_contains(result["code"], "const load = async (name) => await __cjs_import_0(name);", "async arrow rewrite")
+
+proc test_path_loader_preserved():
+    let path = "core/lib/transpiler/cjs2esm/tests/fixtures/discordjs/command-handler/command_loader.cjs"
+    let source = io.readfile(path)
+    let result = convert_cjs_text(source, "node20", "compat", path, true)
+    testing.assert_true(result["ok"], "path loader conversion")
+    testing.assert_contains(result["code"], "const command = require(filePath);", "path loader require preserved")
+    testing.assert_contains(result["code"], "const require = createRequire(import.meta.url);", "path loader shim")
+    testing.assert_false(cjs_test_contains(result["code"], "__cjs_import_"), "path loader avoids import helper")
+
+proc test_cache_access_preserves_rewrite():
+    let source = "async function load(name) {" + chr(10) + "  const cache = require.cache;" + chr(10) + "  return require(name);" + chr(10) + "}" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "cache read conversion")
+    testing.assert_contains(result["code"], "const cache = require.cache;", "cache read preserved")
+    testing.assert_contains(result["code"], "return require(name);", "cache prevents rewrite")
+    testing.assert_contains(result["code"], "const require = createRequire(import.meta.url);", "cache shim")
+
+proc test_json_import_with_input_path():
+    let path = "core/lib/transpiler/cjs2esm/tests/fixtures/json/json_import.cjs"
+    let source = io.readfile(path)
+    let result = convert_cjs_text(source, "node20", "compat", path)
+    testing.assert_true(result["ok"], "JSON file conversion")
+    testing.assert_contains(result["code"], "from \"./config.json\" with { type: \"json\" };", "JSON import attributes")
+    testing.assert_contains(result["code"], "const config = __cjs_module_0;", "JSON default binding")
+    let property = convert_cjs_text("const token = require(\"./config.json\").token;" + chr(10), "node20", "compat", path)
+    testing.assert_true(property["ok"], "JSON property conversion")
+    testing.assert_contains(property["code"], "const token = __cjs_module_0.token;", "JSON property binding")
+    let destructured = convert_cjs_text("const { token } = require(\"./config.json\");" + chr(10), "node20", "compat", path)
+    testing.assert_true(destructured["ok"], "JSON destructuring conversion")
+    testing.assert_contains(destructured["code"], "const { token } = __cjs_module_0;", "JSON destructuring binding")
+
+proc test_json_side_effect_import():
+    let root = "/tmp/opencode/cjs2esm-json-side"
+    if not io.exists(root):
+        io.mkdir(root)
+    io.writefile(path_join(root, "config.json"), "{" + chr(34) + "value" + chr(34) + ": 1}")
+    let path = path_join(root, "side_effect.cjs")
+    io.writefile(path, "require(\"./config.json\");" + chr(10))
+    let source = io.readfile(path)
+    let result = convert_cjs_text(source, "node20", "compat", path)
+    testing.assert_true(result["ok"], "JSON side effect conversion")
+    testing.assert_contains(result["code"], "import \"./config.json\" with { type: \"json\" };", "JSON side effect import")
+
+proc test_relative_path_extensions():
+    let json_base = "core/lib/transpiler/cjs2esm/tests/fixtures/json"
+    let runtime_base = "core/lib/transpiler/cjs2esm/tests/fixtures/runtime"
+    testing.assert_equal(resolve_import_path("./config", json_base), "./config.json", "JSON extension resolution")
+    testing.assert_equal(resolve_import_path("./helper", runtime_base), "./helper.cjs", "CJS extension resolution")
+
+proc test_directory_package_resolution():
+    let root = "/tmp/opencode/cjs2esm-resolver"
+    if not io.exists(root):
+        io.mkdir(root)
+    let package_directory = path_join(root, "package-entry")
+    if not io.exists(package_directory):
+        io.mkdir(package_directory)
+    io.writefile(path_join(package_directory, "package.json"), "{" + chr(34) + "main" + chr(34) + ": " + chr(34) + "entry" + chr(34) + "}")
+    io.writefile(path_join(package_directory, "entry.cjs"), "module.exports = {};" + chr(10))
+    testing.assert_equal(resolve_import_path("./package-entry", root), "./package-entry/entry.cjs", "package main resolution")
 
 proc main():
     let suite = testing.create_suite("cjs2esm")
@@ -329,6 +458,7 @@ proc main():
     testing.add_test(suite, "bootstrap wrapper", test_bootstrap_wrapper)
     testing.add_test(suite, "exports alias wrapper", test_exports_alias_wrapper)
     testing.add_test(suite, "object export names", test_object_export_names)
+    testing.add_test(suite, "reserved export and exports reassignment", test_reserved_export_and_exports_reassignment)
     testing.add_test(suite, "json require wrapper", test_json_require_wrapper)
     testing.add_test(suite, "runtime global replacement", test_runtime_global_replacement)
     testing.add_test(suite, "require main replacement", test_require_main_replacement)
@@ -341,11 +471,13 @@ proc main():
     testing.add_test(suite, "package type update", test_package_type_update)
     testing.add_test(suite, "relative path resolution", test_relative_path_resolution)
     testing.add_test(suite, "transform context", test_transform_context)
+    testing.add_test(suite, "strict mode", test_strict_mode)
     testing.add_test(suite, "import plan helpers", test_import_plan_helpers)
     testing.add_test(suite, "global prologue", test_global_prologue)
     testing.add_test(suite, "dynamic report", test_dynamic_report)
     testing.add_test(suite, "json detection", test_json_detection)
     testing.add_test(suite, "source map output", test_source_map_output)
+    testing.add_test(suite, "output relocation rejected", test_output_relocation_rejected)
     testing.add_test(suite, "package file update", test_package_file_update)
     testing.add_test(suite, "secret redaction", test_secret_redaction)
     testing.add_test(suite, "node builtins", test_node_builtins)
@@ -355,6 +487,7 @@ proc main():
     testing.add_test(suite, "ast declarations visitor", test_ast_declarations_visitor)
     testing.add_test(suite, "comments helper", test_comments_helper)
     testing.add_test(suite, "workspace reporter", test_workspace_reporter)
+    testing.add_test(suite, "workspace recursive paths", test_workspace_recursive_paths)
     testing.add_test(suite, "expression precedence", test_expression_precedence)
     testing.add_test(suite, "require call expression", test_require_call_expression)
     testing.add_test(suite, "member call expression", test_member_call_expression)
@@ -363,6 +496,14 @@ proc main():
     testing.add_test(suite, "async rewrite", test_async_rewrite)
     testing.add_test(suite, "sync require preserved with rewrite flag", test_sync_require_preserved_with_rewrite_flag)
     testing.add_test(suite, "top-level rewrite", test_top_level_rewrite)
+    testing.add_test(suite, "sync arrow preserved", test_sync_arrow_preserved)
+    testing.add_test(suite, "async arrow rewritten", test_async_arrow_rewritten)
+    testing.add_test(suite, "cache access preserves rewrite", test_cache_access_preserves_rewrite)
+    testing.add_test(suite, "path loader preserved", test_path_loader_preserved)
+    testing.add_test(suite, "JSON import with input path", test_json_import_with_input_path)
+    testing.add_test(suite, "JSON side effect import", test_json_side_effect_import)
+    testing.add_test(suite, "relative path extensions", test_relative_path_extensions)
+    testing.add_test(suite, "directory package resolution", test_directory_package_resolution)
     testing.run(suite)
     testing.report(suite)
     if suite["failed"] > 0:

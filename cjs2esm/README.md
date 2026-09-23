@@ -14,12 +14,13 @@ The checked-in converter is compatibility-first:
 - Compatibility shims are injected only when the corresponding global is used.
 - `__dirname`, `__filename`, and complete `require.main === module` checks are rewritten.
 - Dynamic `require()` and `require.cache` manipulation remain on `createRequire` by default.
-- With `--rewrite-dynamic-imports`, dynamic requires in `await`-valid positions (module top level or `async` function bodies) are rewritten to `(await import(...)).default ?? (await import(...))`. Requires inside synchronous functions and files using `require.cache` eviction are never rewritten.
+- With `--rewrite-dynamic-imports`, dynamic requires in `await`-valid positions (module top level or `async` function bodies) are rewritten through a single-import helper that preserves default/namespace interop. Requires inside synchronous functions and files using `require.cache` access are never rewritten.
 - Leading safe static requires are rewritten to ESM imports, including JSON import attributes with destructuring synthesis.
 - `--source-maps` emits Base64 VLQ `.map` files with line-level mappings; `--update-package-json` injects `"type": "module"`.
 - Diagnostic messages redact Discord-style bot token patterns.
 - Existing ESM syntax, shadowed runtime globals, top-level `return`/`this`/`arguments`, and unbalanced input are rejected.
-- Full ESTree AST construction with scope resolution, package updates beyond `"type": "module"`, and the full Discord.js verification harness remain planned work.
+- Strict mode now fails closed for dynamic requires, cache access, non-leading requires, CommonJS export shims, and runtime-global shims; it permits only provably safe leading static imports.
+- Full ESTree AST construction, cross-package output-path rebasing, and the complete Discord.js verification harness remain planned work.
 
 Run the current tests with:
 
@@ -96,12 +97,12 @@ cjs2esm report <project-path>
 
 ### Options & Flags
 
-* `--out=<file.mjs|dir>`: Output file or directory. Without `--out`, the converter writes a same-directory `.mjs` file.
+* `--out=<file.mjs|dir>`: Output file or directory. Without `--out`, the converter writes a same-directory `.mjs` file. Files containing `require()` are rejected when moved to a different directory until output-path rebasing is implemented.
 * `--target=<node18|node20|node22|node24>`: Target Node.js baseline (default: `node20`). All current targets use the conservative `fileURLToPath` compatibility shims.
-* `--mode=<compat|discord>`: Compatibility conversion. Both modes currently preserve inline execution order with `createRequire`.
+* `--mode=<compat|discord|strict>`: Compatibility conversion, Discord-focused compatibility, or fail-closed strict conversion. Strict mode rejects constructs requiring runtime shims.
 * `--dry-run`: Runs analysis, prints diagnostics, and generates report without writing to disk.
 * `--rewrite-dynamic-imports`: Rewrites dynamic `require()` calls in `await`-valid positions to `await import()` with default interop.
-* `--mode strict` is not implemented yet and returns an explicit error.
+* `--mode=strict` is fail-closed: it accepts only leading static imports that do not require CommonJS compatibility shims.
 
 ## Diagnostic Codes
 
@@ -118,10 +119,12 @@ Every transformed construct is evaluated against confidence levels:
 The current converter emits:
 
 * `CJS102` — **Require preserved via `createRequire`** (`[COMPAT_SHIM]`).
+* `CJS201` — **Strict-mode safety rejection** (`[ERROR]`).
 * `CJS103` — **`__dirname`, `__filename`, or `require.main` converted to a conservative target expression** (`[SAFE]`).
-* `CJS202` — **`require.cache` manipulation preserved on `createRequire`** (`[MANUAL_REVIEW]`).
+* `CJS202` — **`require.cache` access preserved on `createRequire`** (`[MANUAL_REVIEW]`).
 * `CJS203` — **Dynamic require rewritten to `await import`** (`[SEMANTIC_CHANGE]`).
 * `CJS301` — **`module.exports` reassignment preserved through the default export object** (`[COMPAT_SHIM]`).
+* `CJS405` — **Output relocation would change relative `require()` resolution.**
 * `CJS400`–`CJS403` — **Unsupported, shadowed, malformed, or unbalanced input.**
 
 Leading safe static requires now emit `CJS101`, and JSON destructuring synthesis emits `CJS104`. Explicit hoisting diagnostics (`CJS201`) remain future work; order-sensitive requires are preserved inline on `createRequire` instead.
