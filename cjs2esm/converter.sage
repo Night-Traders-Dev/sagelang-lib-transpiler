@@ -5,6 +5,7 @@ gc_disable()
 
 from lexer.js_scanner import js_scan_source
 from lexer.js_token import js_is_code_token
+from resolver.path_resolver import resolve_import_path
 
 proc cjs_text_in_list(text, values):
     var index = 0
@@ -101,6 +102,8 @@ proc cjs_empty_analysis():
     analysis["references"] = {}
     analysis["calls"] = []
     analysis["replacements"] = []
+    analysis["imports"] = []
+    analysis["import_prologue_extra"] = []
     analysis["diagnostics"] = []
     analysis["has_existing_esm"] = false
     analysis["needs_require"] = false
@@ -137,7 +140,10 @@ proc cjs_fail(analysis, code, message, line):
 proc cjs_mark_top_declaration(analysis, name, line):
     if name == nil or name == "":
         return false
-    analysis["declared_top"][name] = true
+    if dict_has(analysis["declared_top"], name):
+        analysis["declared_top"][name] = analysis["declared_top"][name] + 1
+    else:
+        analysis["declared_top"][name] = 1
     analysis["declared_anywhere"][name] = true
     return true
 
@@ -555,8 +561,537 @@ proc cjs_analyze_declarations(code, analysis):
     cjs_note_arrow_parameters(code, analysis)
     return index
 
+proc cjs_is_bare_specifier(specifier):
+    if specifier == nil or specifier == "":
+        return false
+    if cjs_starts_with(specifier, "./"):
+        return false
+    if cjs_starts_with(specifier, "../"):
+        return false
+    if cjs_starts_with(specifier, "/"):
+        return false
+    return true
+
+proc cjs_unique_import_temp(analysis, base):
+    var counter = 0
+    while true:
+        let candidate = base + str(counter)
+        if not dict_has(analysis["declared_top"], candidate) and not dict_has(analysis["declared_anywhere"], candidate):
+            return candidate
+        counter = counter + 1
+
+proc cjs_parse_import_destructuring(code, start):
+    let pairs = []
+    var index = start + 1
+    while index < len(code):
+        let token_value = code[index]
+        if token_value.kind == "punct" and token_value.raw == "}":
+            let result = {}
+            result["ok"] = true
+            result["pairs"] = pairs
+            result["stop"] = index + 1
+            return result
+        if token_value.kind == "punct" and token_value.raw == ",":
+            index = index + 1
+        elif token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw):
+            let separator = cjs_code_token_at(code, index + 1)
+            if separator != nil and separator.kind == "punct" and separator.raw == ":":
+                let local = cjs_code_token_at(code, index + 2)
+                if local == nil or local.kind != "word" or cjs_is_keyword_text(local.raw) or not cjs_is_valid_export_name(local.raw):
+                    let result = {}
+                    result["ok"] = false
+                    result["stop"] = index
+                    return result
+                let pair = {}
+                pair["imported"] = token_value.raw
+                pair["local"] = local.raw
+                push(pairs, pair)
+                index = index + 3
+            else:
+                if not cjs_is_valid_export_name(token_value.raw):
+                    let result = {}
+                    result["ok"] = false
+                    result["stop"] = index
+                    return result
+                let pair = {}
+                pair["imported"] = token_value.raw
+                pair["local"] = token_value.raw
+                push(pairs, pair)
+                index = index + 1
+        elif token_value.kind == "string":
+            let separator = cjs_code_token_at(code, index + 1)
+            let local = cjs_code_token_at(code, index + 2)
+            if separator == nil or separator.kind != "punct" or separator.raw != ":" or local == nil or local.kind != "word" or cjs_is_keyword_text(local.raw) or not cjs_is_valid_export_name(local.raw):
+                let result = {}
+                result["ok"] = false
+                result["stop"] = index
+                return result
+            let pair = {}
+            pair["imported"] = cjs_unquote_module_name(token_value.raw)
+            pair["local"] = local.raw
+            push(pairs, pair)
+            index = index + 3
+        else:
+            let result = {}
+            result["ok"] = false
+            result["stop"] = index
+            return result
+    let result = {}
+    result["ok"] = false
+    result["stop"] = index
+    return result
+
+proc cjs_import_require_details(code, index, analysis):
+    let target = cjs_code_token_at(code, index)
+    if target == nil or target.kind != "word" or target.raw != "require" or dict_has(analysis["declared_anywhere"], "require"):
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let call = cjs_require_call_details(code, index)
+    if not call["found"] or not call["is_static"]:
+        let result = {}
+        result["ok"] = false
+        result["stop"] = call["stop"]
+        return result
+    let property_name = ""
+    var stop = call["stop"]
+    let dot = cjs_code_token_at(code, stop)
+    let member = cjs_code_token_at(code, stop + 1)
+    let after_member = cjs_code_token_at(code, stop + 2)
+    if dot != nil and dot.kind == "punct" and dot.raw == "." and member != nil and member.kind == "word" and cjs_is_valid_export_name(member.raw):
+        if after_member != nil and after_member.kind == "punct" and after_member.raw == "(":
+            let result = {}
+            result["ok"] = false
+            result["stop"] = index
+            return result
+        property_name = member.raw
+        stop = stop + 2
+    let result = {}
+    result["ok"] = true
+    result["module"] = call["static_name"]
+    result["property"] = property_name
+    result["stop"] = stop
+    return result
+
+proc cjs_import_specifier_display(specifier, base_directory, analysis, line):
+    if cjs_is_bare_specifier(specifier):
+        return specifier
+    if base_directory == "":
+        return ""
+    let resolved = resolve_import_path(specifier, base_directory)
+    if resolved == nil or resolved == "":
+        return ""
+    let candidate = resolved
+    if cjs_starts_with(candidate, "./") or cjs_starts_with(candidate, "../"):
+        let relative = candidate
+        if cjs_starts_with(relative, "./"):
+            relative = slice(relative, 2, len(relative))
+        if not path_exists(path_join(base_directory, relative)):
+            return ""
+    return candidate
+
+proc cjs_import_base_directory(input_path):
+    if input_path == nil or input_path == "":
+        return ""
+    return path_dirname(input_path)
+
+proc cjs_unique_import_temp(analysis, base):
+    var counter = 0
+    while true:
+        let candidate = base + str(counter)
+        if not dict_has(analysis["declared_top"], candidate) and not dict_has(analysis["declared_anywhere"], candidate) and not cjs_text_in_list(candidate, ["require", "module", "exports", "__filename", "__dirname", "process", "fileURLToPath", "dirname", "createRequire"]):
+            return candidate
+        counter = counter + 1
+
+proc cjs_format_import_pairs(pairs):
+    let output = ""
+    var index = 0
+    while index < len(pairs):
+        if index > 0:
+            output = output + ", "
+        if pairs[index]["imported"] == pairs[index]["local"]:
+            output = output + pairs[index]["imported"]
+        else:
+            output = output + pairs[index]["imported"] + " as " + pairs[index]["local"]
+        index = index + 1
+    return output
+
+proc cjs_format_destructuring(pairs):
+    let output = ""
+    var index = 0
+    while index < len(pairs):
+        if index > 0:
+            output = output + ", "
+        if pairs[index]["imported"] == pairs[index]["local"]:
+            output = output + pairs[index]["local"]
+        else:
+            output = output + pairs[index]["imported"] + ": " + pairs[index]["local"]
+        index = index + 1
+    return output
+
+proc cjs_count_plan_locals(plans):
+    let counts = {}
+    var plan_index = 0
+    while plan_index < len(plans):
+        let plan = plans[plan_index]
+        var local_index = 0
+        while local_index < len(plan["locals"]):
+            let local_name = plan["locals"][local_index]
+            if dict_has(counts, local_name):
+                counts[local_name] = counts[local_name] + 1
+            else:
+                counts[local_name] = 1
+            local_index = local_index + 1
+        plan_index = plan_index + 1
+    return counts
+
+proc cjs_emit_import_plan(plan, analysis):
+    if plan["json"]:
+        push(analysis["imports"], "import " + plan["temp"] + " from " + chr(34) + plan["source"] + chr(34) + " with { type: " + chr(34) + "json" + chr(34) + " };")
+        if plan["kind"] == "default":
+            push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + ";")
+        else:
+            push(analysis["import_prologue_extra"], "const { " + cjs_format_destructuring(plan["pairs"]) + " } = " + plan["temp"] + ";")
+    elif plan["temp"] != "":
+        push(analysis["imports"], "import " + plan["temp"] + " from " + chr(34) + plan["source"] + chr(34) + ";")
+        if plan["kind"] == "default":
+            push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + ";")
+        elif plan["kind"] == "property":
+            push(analysis["import_prologue_extra"], "const " + plan["local"] + " = " + plan["temp"] + "." + plan["property"] + ";")
+        else:
+            push(analysis["import_prologue_extra"], "const { " + cjs_format_destructuring(plan["pairs"]) + " } = " + plan["temp"] + ";")
+    elif plan["kind"] == "default":
+        push(analysis["imports"], "import " + plan["local"] + " from " + chr(34) + plan["source"] + chr(34) + ";")
+    elif plan["kind"] == "property":
+        push(analysis["imports"], "import { " + plan["property"] + " as " + plan["local"] + " } from " + chr(34) + plan["source"] + chr(34) + ";")
+    elif plan["kind"] == "named":
+        push(analysis["imports"], "import { " + cjs_format_import_pairs(plan["pairs"]) + " } from " + chr(34) + plan["source"] + chr(34) + ";")
+    else:
+        push(analysis["imports"], "import " + chr(34) + plan["source"] + chr(34) + ";")
+    if plan["json"]:
+        cjs_add_diagnostic(analysis, "CJS104", "JSON require rewritten with import attributes at line " + str(plan["line"]) + " [SAFE].", "NOTE", plan["line"])
+    else:
+        cjs_add_diagnostic(analysis, "CJS101", "Static require converted to ESM import at line " + str(plan["line"]) + " [SAFE].", "NOTE", plan["line"])
+    analysis["static_require_count"] = analysis["static_require_count"] + 1
+    return true
+
+proc cjs_parse_import_destructuring(code, start):
+    let pairs = []
+    var index = start + 1
+    while index < len(code):
+        let token_value = code[index]
+        if token_value.kind == "punct" and token_value.raw == "}":
+            let result = {}
+            result["ok"] = true
+            result["pairs"] = pairs
+            result["stop"] = index + 1
+            return result
+        if token_value.kind == "punct" and token_value.raw == ",":
+            index = index + 1
+        elif token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw):
+            let separator = cjs_code_token_at(code, index + 1)
+            if separator != nil and separator.kind == "punct" and separator.raw == ":":
+                let local = cjs_code_token_at(code, index + 2)
+                if local == nil or local.kind != "word" or cjs_is_keyword_text(local.raw) or not cjs_is_valid_export_name(local.raw):
+                    let result = {}
+                    result["ok"] = false
+                    result["stop"] = index
+                    return result
+                let pair = {}
+                pair["imported"] = token_value.raw
+                pair["local"] = local.raw
+                push(pairs, pair)
+                index = index + 3
+            else:
+                if not cjs_is_valid_export_name(token_value.raw):
+                    let result = {}
+                    result["ok"] = false
+                    result["stop"] = index
+                    return result
+                let pair = {}
+                pair["imported"] = token_value.raw
+                pair["local"] = token_value.raw
+                push(pairs, pair)
+                index = index + 1
+        elif token_value.kind == "string":
+            let separator = cjs_code_token_at(code, index + 1)
+            let local = cjs_code_token_at(code, index + 2)
+            if separator == nil or separator.kind != "punct" or separator.raw != ":" or local == nil or local.kind != "word" or cjs_is_keyword_text(local.raw) or not cjs_is_valid_export_name(local.raw):
+                let result = {}
+                result["ok"] = false
+                result["stop"] = index
+                return result
+            let pair = {}
+            pair["imported"] = cjs_unquote_module_name(token_value.raw)
+            pair["local"] = local.raw
+            push(pairs, pair)
+            index = index + 3
+        else:
+            let result = {}
+            result["ok"] = false
+            result["stop"] = index
+            return result
+    let result = {}
+    result["ok"] = false
+    result["stop"] = index
+    return result
+
+proc cjs_parse_import_declarator(code, index, analysis, base_directory, line):
+    let pattern = cjs_code_token_at(code, index)
+    let locals = []
+    let pairs = []
+    var kind = ""
+    var position = index
+    if pattern != nil and pattern.kind == "word" and not cjs_is_keyword_text(pattern.raw) and cjs_is_valid_export_name(pattern.raw):
+        push(locals, pattern.raw)
+        kind = "default"
+        position = index + 1
+    elif pattern != nil and pattern.kind == "punct" and pattern.raw == "{":
+        let parsed = cjs_parse_import_destructuring(code, index)
+        if not parsed["ok"]:
+            let result = {}
+            result["ok"] = false
+            result["stop"] = index
+            return result
+        var pair_index = 0
+        while pair_index < len(parsed["pairs"]):
+            push(locals, parsed["pairs"][pair_index]["local"])
+            push(pairs, parsed["pairs"][pair_index])
+            pair_index = pair_index + 1
+        kind = "named"
+        position = parsed["stop"]
+    else:
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let assign = cjs_code_token_at(code, position)
+    if assign == nil or assign.kind != "punct" or assign.raw != "=":
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let details = cjs_import_require_details(code, position + 1, analysis)
+    if not details["ok"]:
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let display = cjs_import_specifier_display(details["module"], base_directory, analysis, line)
+    if display == "":
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let plan = {}
+    plan["locals"] = locals
+    plan["local"] = ""
+    if len(locals) == 1:
+        plan["local"] = locals[0]
+    plan["pairs"] = pairs
+    plan["source"] = display
+    plan["property"] = details["property"]
+    plan["json"] = cjs_ends_with(display, ".json")
+    plan["line"] = line
+    plan["temp"] = ""
+    if kind == "default" and plan["property"] == "":
+        plan["kind"] = "default"
+    elif kind == "default":
+        if cjs_is_bare_specifier(display) or cjs_starts_with(display, "node:"):
+            plan["kind"] = "property"
+        else:
+            plan["kind"] = "property"
+            plan["temp"] = cjs_unique_import_temp(analysis, "__cjs_module_")
+    else:
+        if plan["json"] or not cjs_is_bare_specifier(display):
+            plan["kind"] = "named"
+            plan["temp"] = cjs_unique_import_temp(analysis, "__cjs_module_")
+        else:
+            plan["kind"] = "named"
+    plan["stop"] = details["stop"]
+    plan["ok"] = true
+    return plan
+
+proc cjs_parse_import_statement(code, start, analysis, base_directory):
+    let keyword = code[start]
+    let plans = []
+    var index = start + 1
+    while index < len(code):
+        let declarator = cjs_parse_import_declarator(code, index, analysis, base_directory, keyword.line)
+        if not declarator["ok"]:
+            let result = {}
+            result["ok"] = false
+            result["stop"] = start
+            return result
+        push(plans, declarator)
+        index = declarator["stop"]
+        let separator = cjs_code_token_at(code, index)
+        if separator != nil and separator.kind == "punct" and separator.raw == ",":
+            index = index + 1
+        elif separator != nil and separator.kind == "punct" and separator.raw == ";":
+            let counts = cjs_count_plan_locals(plans)
+            var check_index = 0
+            while check_index < len(plans):
+                var local_index = 0
+                while local_index < len(plans[check_index]["locals"]):
+                    let local_name = plans[check_index]["locals"][local_index]
+                    if cjs_text_in_list(local_name, ["require", "module", "exports", "__filename", "__dirname", "process", "fileURLToPath", "dirname", "createRequire"]):
+                        let result = {}
+                        result["ok"] = false
+                        result["stop"] = start
+                        return result
+                    if dict_has(analysis["declared_top"], local_name) and analysis["declared_top"][local_name] > counts[local_name]:
+                        let result = {}
+                        result["ok"] = false
+                        result["stop"] = start
+                        return result
+                    local_index = local_index + 1
+                check_index = check_index + 1
+            var emit_index = 0
+            while emit_index < len(plans):
+                cjs_emit_import_plan(plans[emit_index], analysis)
+                emit_index = emit_index + 1
+            let remove = {}
+            remove["start"] = keyword.start
+            remove["stop"] = separator.end
+            remove["text"] = ""
+            push(analysis["replacements"], remove)
+            let result = {}
+            result["ok"] = true
+            result["stop"] = index + 1
+            return result
+        else:
+            let result = {}
+            result["ok"] = false
+            result["stop"] = start
+            return result
+    let result = {}
+    result["ok"] = false
+    result["stop"] = start
+    return result
+
+proc cjs_skip_function_definition(code, start):
+    var index = start + 1
+    if index < len(code):
+        let star = code[index]
+        if star.kind == "punct" and star.raw == "*":
+            index = index + 1
+    if index < len(code):
+        let name = code[index]
+        if name.kind == "word" and not cjs_is_keyword_text(name.raw):
+            index = index + 1
+    if index < len(code):
+        let params = code[index]
+        if params.kind == "punct" and params.raw == "(":
+            index = cjs_skip_balanced_group(code, index, ")")
+    if index < len(code):
+        let body = code[index]
+        if body.kind == "punct" and body.raw == "{":
+            return cjs_skip_balanced_group(code, index, "}")
+    return start
+
+proc cjs_skip_class_definition(code, start):
+    var index = start + 1
+    if index < len(code):
+        let name = code[index]
+        if name.kind == "word" and not cjs_is_keyword_text(name.raw):
+            index = index + 1
+    while index < len(code):
+        let token_value = code[index]
+        if token_value.kind == "punct" and token_value.raw == "{":
+            return cjs_skip_balanced_group(code, index, "}")
+        if token_value.kind == "punct" and (token_value.raw == ";" or token_value.raw == "@"):
+            return start
+        index = index + 1
+    return start
+
+proc cjs_parse_side_effect_require(code, index, analysis, base_directory):
+    let details = cjs_import_require_details(code, index, analysis)
+    if not details["ok"]:
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let display = cjs_import_specifier_display(details["module"], base_directory, analysis, code[index].line)
+    if display == "":
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let separator = cjs_code_token_at(code, details["stop"])
+    if separator == nil or separator.kind != "punct" or separator.raw != ";":
+        let result = {}
+        result["ok"] = false
+        result["stop"] = index
+        return result
+    let plan = {}
+    plan["kind"] = "side_effect"
+    plan["locals"] = []
+    plan["pairs"] = []
+    plan["source"] = display
+    plan["property"] = ""
+    plan["json"] = false
+    plan["temp"] = ""
+    plan["line"] = code[index].line
+    cjs_emit_import_plan(plan, analysis)
+    let remove = {}
+    remove["start"] = code[index].start
+    remove["stop"] = separator.end
+    remove["text"] = ""
+    push(analysis["replacements"], remove)
+    let result = {}
+    result["ok"] = true
+    result["stop"] = details["stop"] + 1
+    return result
+
+proc cjs_collect_static_imports(code, analysis, input_path):
+    let base_directory = cjs_import_base_directory(input_path)
+    var brace_depth = 0
+    var index = 0
+    while index < len(code):
+        let token_value = code[index]
+        if brace_depth == 0:
+            if token_value.kind == "keyword" and (token_value.raw == "const" or token_value.raw == "let" or token_value.raw == "var"):
+                let statement = cjs_parse_import_statement(code, index, analysis, base_directory)
+                if not statement["ok"]:
+                    return true
+                index = statement["stop"]
+            elif token_value.kind == "keyword" and token_value.raw == "function":
+                let stop = cjs_skip_function_definition(code, index)
+                if stop == index:
+                    return true
+                index = stop
+            elif token_value.kind == "keyword" and token_value.raw == "class":
+                let stop = cjs_skip_class_definition(code, index)
+                if stop == index:
+                    return true
+                index = stop
+            elif token_value.kind == "punct" and token_value.raw == ";":
+                index = index + 1
+            elif token_value.kind == "word" and token_value.raw == "require" and not dict_has(analysis["declared_anywhere"], "require"):
+                let previous = cjs_previous_code(code, index)
+                if previous == nil or previous.kind != "punct" or previous.raw != ".":
+                    let statement = cjs_parse_side_effect_require(code, index, analysis, base_directory)
+                    if not statement["ok"]:
+                        return true
+                    index = statement["stop"]
+                else:
+                    return true
+            else:
+                return true
+        elif token_value.kind == "punct":
+            if token_value.raw == "{":
+                brace_depth = brace_depth + 1
+            elif token_value.raw == "}":
+                brace_depth = brace_depth - 1
+            index = index + 1
+        else:
+            index = index + 1
+    return true
+
 proc cjs_require_call_details(code, index):
-    let call = cjs_match_call(code, index + 1)
+    let call = cjs_match_call(code, index)
     let details = {}
     details["found"] = call["found"]
     details["stop"] = call["stop"]
@@ -575,11 +1110,28 @@ proc cjs_require_call_details(code, index):
             details["static_name"] = cjs_unquote_module_name(values[0].raw)
     return details
 
+proc cjs_token_is_removed(analysis, token_value):
+    var index = 0
+    while index < len(analysis["replacements"]):
+        let replacement = analysis["replacements"][index]
+        if replacement["text"] == "" and token_value.start >= replacement["start"] and token_value.end <= replacement["stop"]:
+            return true
+        index = index + 1
+    return false
+
 proc cjs_analyze_references(code, analysis, path):
     var brace_depth = 0
     var index = 0
     while index < len(code):
         let token_value = code[index]
+        if cjs_token_is_removed(analysis, token_value):
+            if token_value.kind == "punct":
+                if token_value.raw == "{":
+                    brace_depth = brace_depth + 1
+                elif token_value.raw == "}":
+                    brace_depth = brace_depth - 1
+            index = index + 1
+            continue
         if token_value.kind == "word":
             let previous = cjs_previous_code(code, index)
             let is_property = previous != nil and previous.kind == "punct" and previous.raw == "."
@@ -641,6 +1193,9 @@ proc cjs_replace_runtime_names(code, analysis):
     var index = 0
     while index < len(code):
         let token_value = code[index]
+        if cjs_token_is_removed(analysis, token_value):
+            index = index + 1
+            continue
         if token_value.kind == "word":
             let previous = cjs_previous_code(code, index)
             let is_property = previous != nil and previous.kind == "punct" and previous.raw == "."
@@ -822,6 +1377,9 @@ proc cjs_collect_wholesale_exports(code, analysis):
     var wholesale_index = -1
     var index = 0
     while index + 3 < len(code):
+        if cjs_token_is_removed(analysis, code[index]):
+            index = index + 1
+            continue
         let target = code[index]
         let dot = code[index + 1]
         let name = code[index + 2]
@@ -847,6 +1405,9 @@ proc cjs_record_assignment_exports(code, analysis, wholesale_index):
     var alias_targets = {}
     var index = 0
     while index < len(code):
+        if cjs_token_is_removed(analysis, code[index]):
+            index = index + 1
+            continue
         let token_value = code[index]
         if token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw):
             let assign = cjs_code_token_at(code, index + 1)
@@ -908,6 +1469,15 @@ proc cjs_record_assignment_exports(code, analysis, wholesale_index):
     return true
 
 proc cjs_apply_replacements(source, replacements):
+    var sort_index = 1
+    while sort_index < len(replacements):
+        let current = replacements[sort_index]
+        var sort_position = sort_index
+        while sort_position > 0 and replacements[sort_position - 1]["start"] > current["start"]:
+            replacements[sort_position] = replacements[sort_position - 1]
+            sort_position = sort_position - 1
+        replacements[sort_position] = current
+        sort_index = sort_index + 1
     let output = ""
     var cursor = 0
     var index = 0
@@ -930,6 +1500,14 @@ proc cjs_apply_replacements(source, replacements):
 proc cjs_build_output(source, body, analysis):
     let newline = chr(10)
     let prologue = ""
+    var import_index = 0
+    while import_index < len(analysis["imports"]):
+        prologue = prologue + analysis["imports"][import_index] + newline
+        import_index = import_index + 1
+    var extra_index = 0
+    while extra_index < len(analysis["import_prologue_extra"]):
+        prologue = prologue + analysis["import_prologue_extra"][extra_index] + newline
+        extra_index = extra_index + 1
     if analysis["needs_require"]:
         prologue = prologue + "import { createRequire } from " + chr(34) + "node:module" + chr(34) + ";" + newline
     if analysis["needs_filename"] or analysis["needs_dirname"] or analysis["needs_process"]:
@@ -973,7 +1551,7 @@ proc cjs_build_output(source, body, analysis):
         return head + prologue + body + footer
     return prologue + body + footer
 
-proc convert_cjs_text(source, target, mode):
+proc convert_cjs_text(source, target, mode, input_path = ""):
     if target != "node18" and target != "node20" and target != "node22" and target != "node24":
         let failure = {}
         failure["ok"] = false
@@ -1006,6 +1584,14 @@ proc convert_cjs_text(source, target, mode):
         failure["code"] = ""
         failure["diagnostics"] = analysis["diagnostics"]
         return failure
+    cjs_collect_static_imports(code, analysis, input_path)
+    if not analysis["ok"]:
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = analysis["message"]
+        failure["code"] = ""
+        failure["diagnostics"] = analysis["diagnostics"]
+        return failure
     cjs_analyze_references(code, analysis, "")
     if not analysis["ok"]:
         let failure = {}
@@ -1017,7 +1603,7 @@ proc convert_cjs_text(source, target, mode):
     cjs_analyze_cache_operations(code, analysis)
     let wholesale_index = cjs_collect_wholesale_exports(code, analysis)
     cjs_record_assignment_exports(code, analysis, wholesale_index)
-    let injection_names = ["require", "module", "exports", "__filename", "__dirname"]
+    let injection_names = ["require", "module", "exports", "__filename", "__dirname", "process", "fileURLToPath", "dirname", "createRequire"]
     var injection_index = 0
     while injection_index < len(injection_names):
         let injection_name = injection_names[injection_index]
@@ -1071,7 +1657,7 @@ proc convert_cjs_file(input_path, output_path, target, mode):
         failure["code"] = ""
         failure["diagnostics"] = []
         return failure
-    let converted = convert_cjs_text(source, target, mode)
+    let converted = convert_cjs_text(source, target, mode, input_path)
     if not converted["ok"]:
         return converted
     let parent = path_dirname(output_path)

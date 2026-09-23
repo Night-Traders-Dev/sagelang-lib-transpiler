@@ -59,8 +59,7 @@ proc test_bootstrap_wrapper():
     testing.assert_not_nil(source, "bootstrap fixture")
     let result = convert_cjs_text(source, "node20", "compat")
     testing.assert_true(result["ok"], "bootstrap conversion")
-    testing.assert_contains(result["code"], "import { createRequire } from \"node:module\";", "require shim")
-    testing.assert_contains(result["code"], "const { Client, GatewayIntentBits, Events } = require(\"discord.js\");", "bootstrap body")
+    testing.assert_contains(result["code"], "import { Client, GatewayIntentBits, Events } from \"discord.js\";", "static import")
     testing.assert_contains(result["code"], "client.login(process.env.DISCORD_TOKEN);", "bootstrap body end")
 
 proc test_exports_alias_wrapper():
