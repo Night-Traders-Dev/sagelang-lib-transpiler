@@ -112,6 +112,9 @@ proc cjs_empty_analysis():
     analysis["static_require_count"] = 0
     analysis["has_cache_operation"] = false
     analysis["exports_final_names"] = []
+    analysis["exports_object_names"] = []
+    analysis["exports_shorthand_names"] = []
+    analysis["exports_spec_names"] = []
     analysis["exports_has_default"] = false
     analysis["exports_wholesale"] = false
     return analysis
@@ -696,6 +699,125 @@ proc cjs_analyze_cache_operations(code, analysis):
         index = index + 1
     return true
 
+proc cjs_object_property_name(code, index):
+    let token_value = cjs_code_token_at(code, index)
+    if token_value == nil:
+        return ""
+    if token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw):
+        return token_value.raw
+    if token_value.kind == "string":
+        return cjs_unquote_module_name(token_value.raw)
+    return ""
+
+proc cjs_parse_object_key(code, index):
+    let token_value = cjs_code_token_at(code, index)
+    let result = {}
+    result["name"] = ""
+    result["stop"] = index
+    if token_value == nil:
+        return result
+    if token_value.kind == "word" and (token_value.raw == "async" or token_value.raw == "get" or token_value.raw == "set"):
+        let candidate = cjs_code_token_at(code, index + 1)
+        let opener = cjs_code_token_at(code, index + 2)
+        let star = cjs_code_token_at(code, index + 1)
+        if candidate != nil and candidate.kind == "punct" and candidate.raw == "*":
+            let actual = cjs_code_token_at(code, index + 2)
+            if actual != nil:
+                result["name"] = cjs_object_property_name(code, index + 2)
+                result["stop"] = index + 3
+                return result
+        if candidate != nil and opener != nil and ((candidate.kind == "word" and not cjs_is_keyword_text(candidate.raw)) or candidate.kind == "string") and opener.kind == "punct" and opener.raw == "(":
+            result["name"] = cjs_object_property_name(code, index + 1)
+            result["stop"] = index + 2
+            return result
+        if token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw):
+            result["name"] = token_value.raw
+            result["stop"] = index + 1
+            return result
+        return result
+    if token_value.kind == "punct" and token_value.raw == "*":
+        let actual = cjs_code_token_at(code, index + 1)
+        if actual != nil:
+            result["name"] = cjs_object_property_name(code, index + 1)
+            result["stop"] = index + 2
+            return result
+        return result
+    if token_value.kind == "punct" and token_value.raw == "[":
+        let close = cjs_skip_balanced_group(code, index, "]")
+        let inner = []
+        var inner_index = index + 1
+        while inner_index < close - 1:
+            push(inner, code[inner_index])
+            inner_index = inner_index + 1
+        if len(inner) == 1 and inner[0].kind == "string":
+            result["name"] = cjs_object_property_name(code, index + 1)
+        result["stop"] = close
+        return result
+    result["name"] = cjs_object_property_name(code, index)
+    result["stop"] = index + 1
+    return result
+
+proc cjs_skip_object_method(code, index):
+    var position = index
+    if position < len(code):
+        let star = code[position]
+        if star.kind == "punct" and star.raw == "*":
+            position = position + 1
+    if position < len(code):
+        let params = code[position]
+        if params.kind == "punct" and params.raw == "(":
+            position = cjs_skip_balanced_group(code, position, ")")
+    if position < len(code):
+        let body = code[position]
+        if body.kind == "punct" and body.raw == "{":
+            position = cjs_skip_balanced_group(code, position, "}")
+    return position
+
+proc cjs_collect_object_property_names(code, open_index):
+    let names = []
+    let shorthands = []
+    var index = open_index + 1
+    while index < len(code):
+        let token_value = code[index]
+        if token_value.kind == "punct" and token_value.raw == "}":
+            let result = {}
+            result["names"] = names
+            result["shorthands"] = shorthands
+            result["stop"] = index + 1
+            return result
+        if token_value.kind == "punct" and token_value.raw == ",":
+            index = index + 1
+        elif token_value.kind == "punct" and token_value.raw == "...":
+            index = cjs_skip_expression(code, index + 1)
+        else:
+            let parsed = cjs_parse_object_key(code, index)
+            if parsed["name"] == "" or parsed["name"] == "__proto__":
+                index = cjs_skip_expression(code, parsed["stop"])
+            else:
+                let separator = cjs_code_token_at(code, parsed["stop"])
+                if separator != nil and separator.kind == "punct" and separator.raw == ":":
+                    if cjs_is_valid_export_name(parsed["name"]):
+                        push(names, parsed["name"])
+                    index = cjs_skip_expression(code, parsed["stop"] + 1)
+                elif separator != nil and separator.kind == "punct" and separator.raw == "(":
+                    if cjs_is_valid_export_name(parsed["name"]):
+                        push(names, parsed["name"])
+                    index = cjs_skip_object_method(code, parsed["stop"])
+                else:
+                    let maybe = cjs_code_token_at(code, parsed["stop"])
+                    if token_value.kind == "word" and not cjs_is_keyword_text(token_value.raw) and cjs_is_valid_export_name(parsed["name"]):
+                        push(names, parsed["name"])
+                        push(shorthands, parsed["name"])
+                    if maybe != nil and maybe.kind == "punct" and maybe.raw == "=":
+                        index = cjs_skip_expression(code, parsed["stop"] + 1)
+                    else:
+                        index = parsed["stop"]
+    let result = {}
+    result["names"] = names
+    result["shorthands"] = shorthands
+    result["stop"] = index
+    return result
+
 proc cjs_collect_wholesale_exports(code, analysis):
     var wholesale_index = -1
     var index = 0
@@ -709,6 +831,13 @@ proc cjs_collect_wholesale_exports(code, analysis):
             if after == nil or after.kind != "punct" or (after.raw != "=" and after.raw != "=>"):
                 wholesale_index = index + 3
                 analysis["exports_wholesale"] = true
+                analysis["exports_object_names"] = []
+                analysis["exports_shorthand_names"] = []
+                analysis["exports_spec_names"] = []
+                if after != nil and after.kind == "punct" and after.raw == "{":
+                    let properties = cjs_collect_object_property_names(code, index + 4)
+                    analysis["exports_object_names"] = properties["names"]
+                    analysis["exports_shorthand_names"] = properties["shorthands"]
                 cjs_add_diagnostic(analysis, "CJS301", "module.exports reassignment preserved through default export at line " + str(target.line) + " [COMPAT_SHIM].", "NOTE", target.line)
         index = index + 1
     return wholesale_index
@@ -746,6 +875,8 @@ proc cjs_record_assignment_exports(code, analysis, wholesale_index):
                         if after == nil or after.kind != "punct" or (after.raw != "=" and after.raw != "=>"):
                             if index > wholesale_index and cjs_is_valid_export_name(property_name.raw):
                                 push(names, property_name.raw)
+                                if after.kind == "word" and after.raw == property_name.raw:
+                                    push(analysis["exports_spec_names"], property_name.raw)
         if token_value.kind == "word" and (token_value.raw == "exports" or dict_has(alias_targets, token_value.raw)):
             let dot = cjs_code_token_at(code, index + 1)
             let property_name = cjs_code_token_at(code, index + 2)
@@ -755,13 +886,24 @@ proc cjs_record_assignment_exports(code, analysis, wholesale_index):
                 if after == nil or after.kind != "punct" or (after.raw != "=" and after.raw != "=>"):
                     if index > wholesale_index and cjs_is_valid_export_name(property_name.raw):
                         push(names, property_name.raw)
+                        if after.kind == "word" and after.raw == property_name.raw:
+                            push(analysis["exports_spec_names"], property_name.raw)
         index = index + 1
-    let unique = []
+    let combined = []
+    var object_index = 0
+    while object_index < len(analysis["exports_object_names"]):
+        push(combined, analysis["exports_object_names"][object_index])
+        object_index = object_index + 1
     var name_index = 0
     while name_index < len(names):
-        if not cjs_text_in_list(names[name_index], unique):
-            push(unique, names[name_index])
+        push(combined, names[name_index])
         name_index = name_index + 1
+    let unique = []
+    var unique_index = 0
+    while unique_index < len(combined):
+        if not cjs_text_in_list(combined[unique_index], unique):
+            push(unique, combined[unique_index])
+        unique_index = unique_index + 1
     analysis["exports_final_names"] = unique
     return true
 
@@ -813,9 +955,12 @@ proc cjs_build_output(source, body, analysis):
         var name_index = 0
         while name_index < len(analysis["exports_final_names"]):
             let export_name = analysis["exports_final_names"][name_index]
-            if dict_has(analysis["declared_top"], export_name):
+            if (cjs_text_in_list(export_name, analysis["exports_shorthand_names"]) or cjs_text_in_list(export_name, analysis["exports_spec_names"])) and dict_has(analysis["declared_top"], export_name):
+                footer = footer + "export { " + export_name + " };" + newline
+            elif dict_has(analysis["declared_top"], export_name):
                 return cjs_fail(analysis, "CJS401", "Export name collides with an existing top-level binding.", 1)
-            footer = footer + "export const " + export_name + " = module.exports." + export_name + ";" + newline
+            else:
+                footer = footer + "export const " + export_name + " = module.exports." + export_name + ";" + newline
             name_index = name_index + 1
     if cjs_starts_with(source, "#!"):
         var split = 0

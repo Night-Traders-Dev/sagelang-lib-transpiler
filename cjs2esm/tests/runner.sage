@@ -72,6 +72,19 @@ proc test_exports_alias_wrapper():
     testing.assert_contains(result["code"], "export default module.exports;", "default export")
     testing.assert_contains(result["code"], "module.exports = function main()", "reassignment order")
 
+proc test_object_export_names():
+    let basic = io.readfile("core/lib/transpiler/cjs2esm/tests/fixtures/basic/basic_cjs.cjs")
+    testing.assert_not_nil(basic, "basic fixture")
+    let basic_result = convert_cjs_text(basic, "node20", "compat")
+    testing.assert_true(basic_result["ok"], "basic conversion")
+    testing.assert_contains(basic_result["code"], "export { handler };", "handler export")
+    let slash = io.readfile("core/lib/transpiler/cjs2esm/tests/fixtures/discordjs/slash-builders/slash_cmd.cjs")
+    testing.assert_not_nil(slash, "slash fixture")
+    let slash_result = convert_cjs_text(slash, "node20", "compat")
+    testing.assert_true(slash_result["ok"], "slash conversion")
+    testing.assert_contains(slash_result["code"], "export const data = module.exports.data;", "data export")
+    testing.assert_contains(slash_result["code"], "export const execute = module.exports.execute;", "execute export")
+
 proc test_json_require_wrapper():
     let source = "const config = require(\"./config.json\");" + chr(10) + "module.exports = config;" + chr(10)
     let result = convert_cjs_text(source, "node20", "compat")
@@ -174,6 +187,7 @@ proc main():
     testing.add_test(suite, "scanner ignores comments and strings", test_scanner_ignores_comments_and_strings)
     testing.add_test(suite, "bootstrap wrapper", test_bootstrap_wrapper)
     testing.add_test(suite, "exports alias wrapper", test_exports_alias_wrapper)
+    testing.add_test(suite, "object export names", test_object_export_names)
     testing.add_test(suite, "json require wrapper", test_json_require_wrapper)
     testing.add_test(suite, "runtime global replacement", test_runtime_global_replacement)
     testing.add_test(suite, "require main replacement", test_require_main_replacement)
