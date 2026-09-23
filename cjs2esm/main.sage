@@ -8,6 +8,8 @@ import sys
 from converter import cjs_ends_with, cjs_starts_with, convert_cjs_file, convert_cjs_text
 from parser.parser import parse_program
 from project.manifest import cjs_update_package_file
+from project.reporter import cjs_markdown_report, cjs_report_summary
+from project.workspace import cjs_analyze_project
 
 proc cjs_print_usage():
     print "Usage:"
@@ -212,19 +214,21 @@ proc cjs_check_path(path):
     return cjs_inspect_path(path)
 
 proc cjs_report_path(path, out_option):
-    let source = io.readfile(path)
-    if source == nil and not io.isdir(path):
-        print "Input path could not be read."
-        return 1
-    let report = "# cjs2esm report" + chr(10) + chr(10) + "Input: " + path + chr(10)
+    if not io.isdir(path):
+        return cjs_inspect_path(path)
+    let results = cjs_analyze_project(path, "node20", "compat")
+    let report = cjs_markdown_report(path, results)
+    let summary = cjs_report_summary(results)
     if out_option == nil or out_option == "":
         print report
-        return cjs_check_path(path)
-    if not io.writefile(out_option, report):
-        print "Report could not be written."
+    else:
+        if not io.writefile(out_option, report):
+            print "Report could not be written."
+            return 1
+        print "Wrote " + out_option
+    if summary["failed"] > 0:
         return 1
-    print "Wrote " + out_option
-    return cjs_check_path(path)
+    return 0
 
 proc main():
     let args = cjs_cli_args()

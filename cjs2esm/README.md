@@ -40,9 +40,13 @@ cjs2esm/
 │   ├── js_scanner.sage
 │   └── javascript_lexer.sage
 ├── analyzer/
-│   └── cjs_usage.sage
+│   ├── cjs_usage.sage
+│   ├── scope.sage
+│   └── classifier.sage
 ├── ast/
-│   └── astnodes.sage
+│   ├── astnodes.sage
+│   ├── declarations.sage
+│   └── visitor.sage
 ├── parser/
 │   ├── parser.sage
 │   ├── expression.sage
@@ -55,11 +59,17 @@ cjs2esm/
 │   ├── pass_dynamic.sage
 │   └── pass_json.sage
 ├── printer/
-│   └── codegen.sage
+│   ├── codegen.sage
+│   ├── sourcemap.sage
+│   └── comments.sage
 ├── resolver/
-│   └── path_resolver.sage
+│   ├── path_resolver.sage
+│   ├── package_json.sage
+│   └── node_builtins.sage
 ├── project/
-│   └── manifest.sage
+│   ├── manifest.sage
+│   ├── workspace.sage
+│   └── reporter.sage
 └── tests/
     ├── runner.sage
     └── fixtures/

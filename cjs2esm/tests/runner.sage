@@ -19,6 +19,15 @@ from cjs2esm.transform.pass_dynamic import cjs_dynamic_report
 from cjs2esm.transform.pass_globals import cjs_entry_expression, cjs_global_prologue
 from cjs2esm.transform.pass_imports import cjs_destructured_import_text, cjs_static_import_is_safe, cjs_static_import_text
 from cjs2esm.transform.pass_json import cjs_json_require_names
+from cjs2esm.resolver.node_builtins import cjs_is_node_builtin
+from cjs2esm.resolver.package_json import cjs_package_main_entry, cjs_package_top_level_string
+from cjs2esm.analyzer.scope import cjs_scope_bind, cjs_scope_enter, cjs_scope_exit, cjs_scope_lookup, cjs_scope_tracker
+from cjs2esm.analyzer.classifier import cjs_classification_confidence, cjs_classify_calls
+from cjs2esm.ast.declarations import js_export_default, js_export_named, js_function_declaration, js_import_declaration, js_import_pair, js_program_node, js_variable_declaration, js_variable_declarator
+from cjs2esm.ast.visitor import js_visit_kinds
+from cjs2esm.printer.comments import cjs_is_line_comment
+from cjs2esm.project.reporter import cjs_markdown_report, cjs_report_summary
+from cjs2esm.project.workspace import cjs_analyze_project, cjs_list_inputs
 
 proc cjs_find_token(tokens, kind, raw):
     var index = 0
@@ -231,6 +240,63 @@ proc test_statement_splitting():
     testing.assert_equal(parsed["statements"][0]["kind"], "variable_declaration", "first statement")
     testing.assert_equal(parsed["statements"][3]["kind"], "expression", "last statement")
 
+proc test_node_builtins():
+    testing.assert_true(cjs_is_node_builtin("node:fs"), "node prefix builtin")
+    testing.assert_true(cjs_is_node_builtin("path"), "bare builtin")
+    testing.assert_false(cjs_is_node_builtin("discord.js"), "package not builtin")
+
+proc test_package_main_entry():
+    testing.assert_equal(cjs_package_main_entry("core/lib/transpiler/cjs2esm/tests/fixtures/json"), "index.js", "missing package default")
+    io.writefile("/tmp/opencode/cjs2esm-pkg.json", "{" + chr(10) + "  " + chr(34) + "main" + chr(34) + ": " + chr(34) + "bot.js" + chr(34) + chr(10) + "}")
+    testing.assert_equal(cjs_package_top_level_string(io.readfile("/tmp/opencode/cjs2esm-pkg.json"), "main"), "bot.js", "package main field")
+
+proc test_scope_tracker():
+    let tracker = cjs_scope_tracker()
+    cjs_scope_bind(tracker, "top")
+    cjs_scope_enter(tracker, "function")
+    cjs_scope_bind(tracker, "local")
+    testing.assert_true(cjs_scope_lookup(tracker, "top"), "outer lookup")
+    testing.assert_true(cjs_scope_lookup(tracker, "local"), "inner lookup")
+    cjs_scope_exit(tracker)
+    testing.assert_true(cjs_scope_lookup(tracker, "top"), "outer after exit")
+    testing.assert_false(cjs_scope_lookup(tracker, "local"), "inner after exit")
+
+proc test_classifier():
+    let static_call = {}
+    static_call["static"] = true
+    let dynamic_call = {}
+    dynamic_call["static"] = false
+    let pure = cjs_classify_calls([static_call], false)
+    testing.assert_equal(pure["classification"], "PURE_CJS", "pure classification")
+    testing.assert_equal(cjs_classification_confidence("PURE_CJS"), "SAFE", "pure confidence")
+    let mixed = cjs_classify_calls([static_call, dynamic_call], false)
+    testing.assert_equal(mixed["classification"], "DYNAMIC", "dynamic classification")
+    testing.assert_equal(mixed["dynamic"], 1, "dynamic count")
+
+proc test_ast_declarations_visitor():
+    let declarator = js_variable_declarator("value", nil)
+    let declaration = js_variable_declaration("const", [declarator])
+    let program = js_program_node([declaration, js_import_declaration("fs", [js_import_pair("readFile", "readFile")]), js_export_default("value"), js_export_named(["value"]), js_function_declaration("main", false)])
+    let kinds = []
+    js_visit_kinds(program, kinds)
+    testing.assert_equal(len(kinds), 7, "visited kinds")
+    testing.assert_equal(kinds[0], "Program", "program kind")
+    testing.assert_equal(kinds[1], "VariableDeclaration", "declaration kind")
+
+proc test_comments_helper():
+    testing.assert_true(cjs_is_line_comment("// hello"), "line comment")
+    testing.assert_false(cjs_is_line_comment("/* hello */"), "block comment")
+
+proc test_workspace_reporter():
+    let inputs = cjs_list_inputs("core/lib/transpiler/cjs2esm/tests/fixtures/runtime")
+    testing.assert_true(len(inputs) >= 5, "workspace inputs")
+    let results = cjs_analyze_project("core/lib/transpiler/cjs2esm/tests/fixtures/runtime", "node20", "compat")
+    testing.assert_true(len(results) >= 5, "workspace results")
+    let report = cjs_markdown_report("runtime", results)
+    testing.assert_contains(report, "# cjs2esm migration report", "report header")
+    let summary = cjs_report_summary(results)
+    testing.assert_equal(summary["passed"] + summary["failed"], len(results), "summary total")
+
 proc test_secret_redaction():
     let token = "Maaaaaaaaaaaaaaaaaaaaaaa.abcdef.abcdefghijklmnopqrstuvwxyz0"
     testing.assert_equal(cjs_redact_secrets("saw " + token + " here"), "saw [REDACTED] here", "token redacted")
@@ -282,6 +348,13 @@ proc main():
     testing.add_test(suite, "source map output", test_source_map_output)
     testing.add_test(suite, "package file update", test_package_file_update)
     testing.add_test(suite, "secret redaction", test_secret_redaction)
+    testing.add_test(suite, "node builtins", test_node_builtins)
+    testing.add_test(suite, "package main entry", test_package_main_entry)
+    testing.add_test(suite, "scope tracker", test_scope_tracker)
+    testing.add_test(suite, "classifier", test_classifier)
+    testing.add_test(suite, "ast declarations visitor", test_ast_declarations_visitor)
+    testing.add_test(suite, "comments helper", test_comments_helper)
+    testing.add_test(suite, "workspace reporter", test_workspace_reporter)
     testing.add_test(suite, "expression precedence", test_expression_precedence)
     testing.add_test(suite, "require call expression", test_require_call_expression)
     testing.add_test(suite, "member call expression", test_member_call_expression)
