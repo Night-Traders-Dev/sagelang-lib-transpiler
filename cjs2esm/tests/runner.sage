@@ -11,6 +11,7 @@ from cjs2esm.converter import cjs_redact_secrets, convert_cjs_file, convert_cjs_
 from cjs2esm.lexer.javascript_lexer import js_code_tokens, js_tokenize
 from cjs2esm.lexer.js_scanner import js_scan_source
 from cjs2esm.printer.codegen import cjs_emit_default_export, cjs_emit_json_import, cjs_emit_named_import
+from cjs2esm.parser.parser import parse_expression_text, parse_program
 from cjs2esm.project.manifest import cjs_update_package_file, cjs_update_package_type_text
 from cjs2esm.resolver.path_resolver import resolve_import_path
 from cjs2esm.transform.context import cjs_validate_mode, cjs_validate_target
@@ -195,6 +196,41 @@ proc test_package_file_update():
     testing.assert_true(updated["changed"], "package file changed")
     testing.assert_contains(io.readfile("/tmp/opencode/cjs2esm-package.json"), chr(34) + "type" + chr(34) + ": " + chr(34) + "module" + chr(34), "package module type")
 
+proc test_expression_precedence():
+    let parsed = parse_expression_text("1 + 2 * 3")
+    testing.assert_true(parsed["ok"], "precedence parse")
+    testing.assert_equal(parsed["node"]["kind"], "Binary", "root binary")
+    testing.assert_equal(parsed["node"]["operator"], "+", "root operator")
+    testing.assert_equal(parsed["node"]["right"]["kind"], "Binary", "right binary")
+    testing.assert_equal(parsed["node"]["right"]["operator"], "*", "right operator")
+
+proc test_require_call_expression():
+    let parsed = parse_expression_text("require(\"discord.js\")")
+    testing.assert_true(parsed["ok"], "require parse")
+    testing.assert_equal(parsed["node"]["kind"], "Call", "call node")
+    testing.assert_equal(parsed["node"]["callee"]["name"], "require", "callee name")
+    testing.assert_equal(len(parsed["node"]["args"]), 1, "one argument")
+
+proc test_member_call_expression():
+    let parsed = parse_expression_text("client.once(Events.ClientReady, handler)")
+    testing.assert_true(parsed["ok"], "member call parse")
+    testing.assert_equal(parsed["node"]["kind"], "Call", "call node")
+    testing.assert_equal(parsed["node"]["callee"]["kind"], "Member", "member callee")
+
+proc test_arrow_expression():
+    let parsed = parse_expression_text("c => c + 1")
+    testing.assert_true(parsed["ok"], "arrow parse")
+    testing.assert_equal(parsed["node"]["kind"], "Arrow", "arrow node")
+
+proc test_statement_splitting():
+    let source = io.readfile("core/lib/transpiler/cjs2esm/tests/fixtures/discordjs/bot-bootstrap/bootstrap.cjs")
+    testing.assert_not_nil(source, "bootstrap fixture")
+    let parsed = parse_program(source)
+    testing.assert_true(parsed["ok"], "program parse")
+    testing.assert_equal(len(parsed["statements"]), 4, "statement count")
+    testing.assert_equal(parsed["statements"][0]["kind"], "variable_declaration", "first statement")
+    testing.assert_equal(parsed["statements"][3]["kind"], "expression", "last statement")
+
 proc test_secret_redaction():
     let token = "Maaaaaaaaaaaaaaaaaaaaaaa.abcdef.abcdefghijklmnopqrstuvwxyz0"
     testing.assert_equal(cjs_redact_secrets("saw " + token + " here"), "saw [REDACTED] here", "token redacted")
@@ -246,6 +282,11 @@ proc main():
     testing.add_test(suite, "source map output", test_source_map_output)
     testing.add_test(suite, "package file update", test_package_file_update)
     testing.add_test(suite, "secret redaction", test_secret_redaction)
+    testing.add_test(suite, "expression precedence", test_expression_precedence)
+    testing.add_test(suite, "require call expression", test_require_call_expression)
+    testing.add_test(suite, "member call expression", test_member_call_expression)
+    testing.add_test(suite, "arrow expression", test_arrow_expression)
+    testing.add_test(suite, "statement splitting", test_statement_splitting)
     testing.add_test(suite, "async rewrite", test_async_rewrite)
     testing.add_test(suite, "sync require preserved with rewrite flag", test_sync_require_preserved_with_rewrite_flag)
     testing.add_test(suite, "top-level rewrite", test_top_level_rewrite)

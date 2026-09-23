@@ -6,6 +6,7 @@ gc_disable()
 import io
 import sys
 from converter import cjs_ends_with, cjs_starts_with, convert_cjs_file, convert_cjs_text
+from parser.parser import parse_program
 from project.manifest import cjs_update_package_file
 
 proc cjs_print_usage():
@@ -164,6 +165,16 @@ proc cjs_inspect_path(path):
     if not converted["ok"]:
         print converted["message"]
     cjs_print_diagnostics(converted["diagnostics"])
+    let parsed = parse_program(source)
+    if parsed["ok"]:
+        print "Statements: " + str(len(parsed["statements"]))
+        var statement_index = 0
+        while statement_index < len(parsed["statements"]):
+            let statement = parsed["statements"][statement_index]
+            print "  line " + str(statement["line"]) + ": " + statement["kind"]
+            statement_index = statement_index + 1
+    else:
+        print "Parse failed."
     if converted["ok"]:
         return 0
     return 1

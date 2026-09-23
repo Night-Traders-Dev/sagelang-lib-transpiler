@@ -9,6 +9,7 @@
 The checked-in converter is compatibility-first:
 
 - JavaScript sources are scanned with byte-accurate token spans.
+- A Pratt expression parser and top-level statement splitter produce statement records consumed by `inspect`.
 - Supported CommonJS bodies are preserved byte-for-byte.
 - Compatibility shims are injected only when the corresponding global is used.
 - `__dirname`, `__filename`, and complete `require.main === module` checks are rewritten.
@@ -18,7 +19,7 @@ The checked-in converter is compatibility-first:
 - `--source-maps` emits Base64 VLQ `.map` files with line-level mappings; `--update-package-json` injects `"type": "module"`.
 - Diagnostic messages redact Discord-style bot token patterns.
 - Existing ESM syntax, shadowed runtime globals, top-level `return`/`this`/`arguments`, and unbalanced input are rejected.
-- Full AST parsing, async dynamic-import rewriting, and the full Discord.js verification harness remain planned work.
+- Full ESTree AST construction with scope resolution, package updates beyond `"type": "module"`, and the full Discord.js verification harness remain planned work.
 
 Run the current tests with:
 
@@ -42,6 +43,10 @@ cjs2esm/
 │   └── cjs_usage.sage
 ├── ast/
 │   └── astnodes.sage
+├── parser/
+│   ├── parser.sage
+│   ├── expression.sage
+│   └── statements.sage
 ├── transform/
 │   ├── context.sage
 │   ├── pass_imports.sage
