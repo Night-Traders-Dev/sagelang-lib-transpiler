@@ -12,7 +12,8 @@ The checked-in converter is compatibility-first:
 - Supported CommonJS bodies are preserved byte-for-byte.
 - Compatibility shims are injected only when the corresponding global is used.
 - `__dirname`, `__filename`, and complete `require.main === module` checks are rewritten.
-- Dynamic `require()` and `require.cache` manipulation remain on `createRequire`.
+- Dynamic `require()` and `require.cache` manipulation remain on `createRequire` by default.
+- With `--rewrite-dynamic-imports`, dynamic requires in `await`-valid positions (module top level or `async` function bodies) are rewritten to `(await import(...)).default ?? (await import(...))`. Requires inside synchronous functions and files using `require.cache` eviction are never rewritten.
 - Leading safe static requires are rewritten to ESM imports, including JSON import attributes with destructuring synthesis.
 - `--source-maps` emits Base64 VLQ `.map` files with line-level mappings; `--update-package-json` injects `"type": "module"`.
 - Diagnostic messages redact Discord-style bot token patterns.
@@ -84,7 +85,8 @@ cjs2esm report <project-path>
 * `--target=<node18|node20|node22|node24>`: Target Node.js baseline (default: `node20`). All current targets use the conservative `fileURLToPath` compatibility shims.
 * `--mode=<compat|discord>`: Compatibility conversion. Both modes currently preserve inline execution order with `createRequire`.
 * `--dry-run`: Runs analysis, prints diagnostics, and generates report without writing to disk.
-* `--rewrite-dynamic-imports` and `--mode strict` are not implemented yet and return explicit errors.
+* `--rewrite-dynamic-imports`: Rewrites dynamic `require()` calls in `await`-valid positions to `await import()` with default interop.
+* `--mode strict` is not implemented yet and returns an explicit error.
 
 ## Diagnostic Codes
 
@@ -103,6 +105,7 @@ The current converter emits:
 * `CJS102` — **Require preserved via `createRequire`** (`[COMPAT_SHIM]`).
 * `CJS103` — **`__dirname`, `__filename`, or `require.main` converted to a conservative target expression** (`[SAFE]`).
 * `CJS202` — **`require.cache` manipulation preserved on `createRequire`** (`[MANUAL_REVIEW]`).
+* `CJS203` — **Dynamic require rewritten to `await import`** (`[SEMANTIC_CHANGE]`).
 * `CJS301` — **`module.exports` reassignment preserved through the default export object** (`[COMPAT_SHIM]`).
 * `CJS400`–`CJS403` — **Unsupported, shadowed, malformed, or unbalanced input.**
 

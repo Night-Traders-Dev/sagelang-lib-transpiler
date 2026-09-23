@@ -10,7 +10,7 @@ from project.manifest import cjs_update_package_file
 
 proc cjs_print_usage():
     print "Usage:"
-    print "  cjs2esm convert <input.cjs> [--out <file.mjs|dir>] [--target node18|node20|node22|node24] [--mode compat|discord] [--source-maps] [--update-package-json] [--dry-run]"
+    print "  cjs2esm convert <input.cjs> [--out <file.mjs|dir>] [--target node18|node20|node22|node24] [--mode compat|discord] [--source-maps] [--update-package-json] [--rewrite-dynamic-imports] [--dry-run]"
     print "  cjs2esm inspect <input.cjs>"
     print "  cjs2esm check <path>"
     print "  cjs2esm report <path> [--out <report.md>]"
@@ -75,6 +75,7 @@ proc cjs_execute_convert(args):
     var dry_run = false
     var want_map = false
     var update_package = false
+    var rewrite_dynamic = false
     var index = 0
     while index < len(args):
         let token_value = args[index]
@@ -88,8 +89,8 @@ proc cjs_execute_convert(args):
             update_package = true
             index = index + 1
         elif token_value == "--rewrite-dynamic-imports":
-            print "Async dynamic-import rewriting is not implemented in this converter version."
-            return 1
+            rewrite_dynamic = true
+            index = index + 1
         elif token_value == "--help" or token_value == "-h":
             cjs_print_usage()
             return 0
@@ -132,7 +133,7 @@ proc cjs_execute_convert(args):
         cjs_print_diagnostics(converted["diagnostics"])
         return 0
     let output_path = cjs_output_file_path(input_path, out_option)
-    let converted = convert_cjs_file(input_path, output_path, target, mode, want_map)
+    let converted = convert_cjs_file(input_path, output_path, target, mode, want_map, rewrite_dynamic)
     if not converted["ok"]:
         print converted["message"]
         cjs_print_diagnostics(converted["diagnostics"])

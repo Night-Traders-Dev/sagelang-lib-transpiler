@@ -200,6 +200,25 @@ proc test_secret_redaction():
     testing.assert_equal(cjs_redact_secrets("saw " + token + " here"), "saw [REDACTED] here", "token redacted")
     testing.assert_equal(cjs_redact_secrets("plain message"), "plain message", "plain message kept")
 
+proc test_async_rewrite():
+    let source = "async function load(name) {" + chr(10) + "  const helper = require(name);" + chr(10) + "  return helper;" + chr(10) + "}" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "async rewrite conversion")
+    testing.assert_contains(result["code"], "(await import(name)).default ?? (await import(name))", "await import rewrite")
+
+proc test_sync_require_preserved_with_rewrite_flag():
+    let source = "function load(name) {" + chr(10) + "  return require(name);" + chr(10) + "}" + chr(10) + "module.exports = { load };" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "sync rewrite conversion")
+    testing.assert_contains(result["code"], "return require(name);", "sync require preserved")
+    testing.assert_contains(result["code"], "const require = createRequire(import.meta.url);", "sync shim kept")
+
+proc test_top_level_rewrite():
+    let source = "const name = \"./helper3.cjs\";" + chr(10) + "const helper = require(name);" + chr(10) + "console.log(helper(\"ann\"));" + chr(10)
+    let result = convert_cjs_text(source, "node20", "compat", "", true)
+    testing.assert_true(result["ok"], "top-level rewrite conversion")
+    testing.assert_contains(result["code"], "(await import(name)).default ?? (await import(name))", "top-level rewrite")
+
 proc main():
     let suite = testing.create_suite("cjs2esm")
     testing.add_test(suite, "scanner spans", test_scanner_spans)
@@ -227,6 +246,9 @@ proc main():
     testing.add_test(suite, "source map output", test_source_map_output)
     testing.add_test(suite, "package file update", test_package_file_update)
     testing.add_test(suite, "secret redaction", test_secret_redaction)
+    testing.add_test(suite, "async rewrite", test_async_rewrite)
+    testing.add_test(suite, "sync require preserved with rewrite flag", test_sync_require_preserved_with_rewrite_flag)
+    testing.add_test(suite, "top-level rewrite", test_top_level_rewrite)
     testing.run(suite)
     testing.report(suite)
     if suite["failed"] > 0:

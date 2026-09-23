@@ -7,6 +7,7 @@ from lexer.js_scanner import js_scan_source
 from lexer.js_token import js_is_code_token
 from printer.sourcemap import cjs_build_source_map, cjs_count_lines
 from resolver.path_resolver import resolve_import_path
+from transform.pass_dynamic import cjs_dyn_rewritable_calls
 
 proc cjs_text_in_list(text, values):
     var index = 0
@@ -1619,7 +1620,33 @@ proc cjs_build_output(source, body, analysis):
         return head + prologue + body + footer
     return prologue + body + footer
 
-proc convert_cjs_text(source, target, mode, input_path = ""):
+proc cjs_span_overlaps_removals(analysis, start, stop):
+    var index = 0
+    while index < len(analysis["replacements"]):
+        let existing = analysis["replacements"][index]
+        if not (stop <= existing["start"] or start >= existing["stop"]):
+            return true
+        index = index + 1
+    return false
+
+proc cjs_rewrite_dynamic_imports(source, code, analysis):
+    if analysis["has_cache_operation"]:
+        return true
+    let calls = cjs_dyn_rewritable_calls(code)
+    var index = 0
+    while index < len(calls):
+        let call = calls[index]
+        if not cjs_span_overlaps_removals(analysis, call["start"], call["stop"]):
+            let inner = slice(source, call["arg_start"], call["arg_stop"])
+            cjs_add_replacement(analysis, call["start"], call["stop"], "(await import(" + inner + ")).default ?? (await import(" + inner + "))", call["line"])
+            cjs_remove_reference(analysis, "require")
+            if not dict_has(analysis["references"], "require") or analysis["references"]["require"] == 0:
+                analysis["needs_require"] = false
+            cjs_add_diagnostic(analysis, "CJS203", "Dynamic require rewritten to await import at line " + str(call["line"]) + ". The argument must be a valid module specifier or file URL [SEMANTIC_CHANGE].", "NOTE", call["line"])
+        index = index + 1
+    return true
+
+proc convert_cjs_text(source, target, mode, input_path = "", rewrite_dynamic = false):
     if target != "node18" and target != "node20" and target != "node22" and target != "node24":
         let failure = {}
         failure["ok"] = false
@@ -1693,6 +1720,15 @@ proc convert_cjs_text(source, target, mode, input_path = ""):
         failure["code"] = ""
         failure["diagnostics"] = analysis["diagnostics"]
         return failure
+    if rewrite_dynamic:
+        cjs_rewrite_dynamic_imports(source, code, analysis)
+        if not analysis["ok"]:
+            let failure = {}
+            failure["ok"] = false
+            failure["message"] = analysis["message"]
+            failure["code"] = ""
+            failure["diagnostics"] = analysis["diagnostics"]
+            return failure
     let replaced = cjs_apply_replacements(source, analysis["replacements"])
     if not replaced["ok"]:
         let failure = {}
@@ -1718,7 +1754,7 @@ proc convert_cjs_text(source, target, mode, input_path = ""):
     result["map_total"] = cjs_newline_count(output) + 1
     return result
 
-proc convert_cjs_file(input_path, output_path, target, mode, want_map = false):
+proc convert_cjs_file(input_path, output_path, target, mode, want_map = false, rewrite_dynamic = false):
     import io
     let source = io.readfile(input_path)
     if source == nil:
@@ -1728,7 +1764,7 @@ proc convert_cjs_file(input_path, output_path, target, mode, want_map = false):
         failure["code"] = ""
         failure["diagnostics"] = []
         return failure
-    let converted = convert_cjs_text(source, target, mode, input_path)
+    let converted = convert_cjs_text(source, target, mode, input_path, rewrite_dynamic)
     if not converted["ok"]:
         return converted
     let parent = path_dirname(output_path)
