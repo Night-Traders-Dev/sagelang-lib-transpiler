@@ -13,8 +13,11 @@ The checked-in converter is compatibility-first:
 - Compatibility shims are injected only when the corresponding global is used.
 - `__dirname`, `__filename`, and complete `require.main === module` checks are rewritten.
 - Dynamic `require()` and `require.cache` manipulation remain on `createRequire`.
+- Leading safe static requires are rewritten to ESM imports, including JSON import attributes with destructuring synthesis.
+- `--source-maps` emits Base64 VLQ `.map` files with line-level mappings; `--update-package-json` injects `"type": "module"`.
+- Diagnostic messages redact Discord-style bot token patterns.
 - Existing ESM syntax, shadowed runtime globals, top-level `return`/`this`/`arguments`, and unbalanced input are rejected.
-- Static import rewriting, full AST parsing, source maps, package updates, async dynamic-import rewriting, secret redaction, and the full Discord.js verification harness remain planned work.
+- Full AST parsing, async dynamic-import rewriting, and the full Discord.js verification harness remain planned work.
 
 Run the current tests with:
 
@@ -81,7 +84,7 @@ cjs2esm report <project-path>
 * `--target=<node18|node20|node22|node24>`: Target Node.js baseline (default: `node20`). All current targets use the conservative `fileURLToPath` compatibility shims.
 * `--mode=<compat|discord>`: Compatibility conversion. Both modes currently preserve inline execution order with `createRequire`.
 * `--dry-run`: Runs analysis, prints diagnostics, and generates report without writing to disk.
-* `--source-maps`, `--update-package-json`, `--rewrite-dynamic-imports`, and `--mode strict` are not implemented yet and return explicit errors.
+* `--rewrite-dynamic-imports` and `--mode strict` are not implemented yet and return explicit errors.
 
 ## Diagnostic Codes
 
@@ -103,7 +106,7 @@ The current converter emits:
 * `CJS301` — **`module.exports` reassignment preserved through the default export object** (`[COMPAT_SHIM]`).
 * `CJS400`–`CJS403` — **Unsupported, shadowed, malformed, or unbalanced input.**
 
-The full planned registry also includes static-import conversion (`CJS101`), JSON import-attribute synthesis (`CJS104`), and explicit hoisting diagnostics (`CJS201`). Those remain future work.
+Leading safe static requires now emit `CJS101`, and JSON destructuring synthesis emits `CJS104`. Explicit hoisting diagnostics (`CJS201`) remain future work; order-sensitive requires are preserved inline on `createRequire` instead.
 
 ## Phased Implementation Roadmap
 
@@ -150,7 +153,7 @@ The full planned registry also includes static-import conversion (`CJS101`), JSO
 
 Bot repositories frequently store tokens and keys in local configuration files or scripts. The transpiler guarantees:
 
-* **Token Redaction**: Planned. Discord Bot token patterns are not yet stripped from diagnostic outputs and reports.
+* **Token Redaction**: Discord Bot token patterns (`[MNO]...`) are replaced with `[REDACTED]` in diagnostic outputs and reports.
 * **Non-Execution**: The transpiler scans input statically and never evaluates or executes project source code at transform time.
 * **Credential Isolation**: Planned. `.env` and secret configuration files are not yet specially excluded from diagnostic output.
 

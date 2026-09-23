@@ -5,6 +5,7 @@ gc_disable()
 
 from lexer.js_scanner import js_scan_source
 from lexer.js_token import js_is_code_token
+from printer.sourcemap import cjs_build_source_map, cjs_count_lines
 from resolver.path_resolver import resolve_import_path
 
 proc cjs_text_in_list(text, values):
@@ -92,6 +93,72 @@ proc cjs_unquote_module_name(raw):
         return slice(raw, 1, len(raw) - 1)
     return ""
 
+proc cjs_newline_count(text):
+    var count = 0
+    var index = 0
+    while index < len(text):
+        if text[index] == chr(10):
+            count = count + 1
+        index = index + 1
+    return count
+
+proc cjs_is_token_char(value):
+    if value == nil or value == "":
+        return false
+    if value >= "a" and value <= "z":
+        return true
+    if value >= "A" and value <= "Z":
+        return true
+    if value >= "0" and value <= "9":
+        return true
+    if value == "_" or value == "-" or value == ".":
+        return true
+    return false
+
+proc cjs_looks_like_discord_token(candidate):
+    let first_dot = -1
+    let second_dot = -1
+    var index = 0
+    while index < len(candidate):
+        if candidate[index] == ".":
+            if first_dot < 0:
+                first_dot = index
+            elif second_dot < 0:
+                second_dot = index
+            else:
+                return false
+        index = index + 1
+    if first_dot < 0 or second_dot < 0:
+        return false
+    let head = slice(candidate, 0, first_dot)
+    let middle = slice(candidate, first_dot + 1, second_dot)
+    let tail = slice(candidate, second_dot + 1, len(candidate))
+    if len(head) < 20 or len(middle) < 6 or len(tail) < 20:
+        return false
+    if head[0] != "M" and head[0] != "N" and head[0] != "O":
+        return false
+    return true
+
+proc cjs_redact_secrets(text):
+    if text == nil or text == "":
+        return text
+    let output = ""
+    var index = 0
+    while index < len(text):
+        if cjs_is_token_char(text[index]):
+            let start = index
+            while index < len(text) and cjs_is_token_char(text[index]):
+                index = index + 1
+            let candidate = slice(text, start, index)
+            if cjs_looks_like_discord_token(candidate):
+                output = output + "[REDACTED]"
+            else:
+                output = output + candidate
+        else:
+            output = output + text[index]
+            index = index + 1
+    return output
+
 proc cjs_empty_analysis():
     let analysis = {}
     analysis["ok"] = true
@@ -125,7 +192,7 @@ proc cjs_empty_analysis():
 proc cjs_add_diagnostic(analysis, code, message, severity, line):
     let diagnostic = {}
     diagnostic["code"] = code
-    diagnostic["message"] = message
+    diagnostic["message"] = cjs_redact_secrets(message)
     diagnostic["severity"] = severity
     diagnostic["line"] = line
     push(analysis["diagnostics"], diagnostic)
@@ -1527,6 +1594,7 @@ proc cjs_build_output(source, body, analysis):
         prologue = prologue + "const exports = module.exports;" + newline
     if prologue != "":
         prologue = prologue + newline
+    analysis["prologue_newlines"] = cjs_newline_count(prologue)
     let footer = ""
     if analysis["needs_module"]:
         footer = footer + newline + ";" + newline + "export default module.exports;" + newline
@@ -1645,9 +1713,12 @@ proc convert_cjs_text(source, target, mode, input_path = ""):
     result["ok"] = true
     result["code"] = output
     result["diagnostics"] = analysis["diagnostics"]
+    result["map_prologue"] = analysis["prologue_newlines"]
+    result["map_body"] = cjs_newline_count(replaced["code"]) + 1
+    result["map_total"] = cjs_newline_count(output) + 1
     return result
 
-proc convert_cjs_file(input_path, output_path, target, mode):
+proc convert_cjs_file(input_path, output_path, target, mode, want_map = false):
     import io
     let source = io.readfile(input_path)
     if source == nil:
@@ -1669,7 +1740,18 @@ proc convert_cjs_file(input_path, output_path, target, mode):
             failure["code"] = ""
             failure["diagnostics"] = converted["diagnostics"]
             return failure
-    if not io.writefile(output_path, converted["code"]):
+    let final_code = converted["code"]
+    if want_map:
+        let map = cjs_build_source_map(output_path, input_path, converted["map_prologue"], converted["map_body"], converted["map_total"])
+        if not io.writefile(output_path + ".map", map["text"]):
+            let failure = {}
+            failure["ok"] = false
+            failure["message"] = "Source map could not be written."
+            failure["code"] = ""
+            failure["diagnostics"] = converted["diagnostics"]
+            return failure
+        final_code = final_code + chr(10) + "//# sourceMappingURL=" + path_basename(output_path) + ".map" + chr(10)
+    if not io.writefile(output_path, final_code):
         let failure = {}
         failure["ok"] = false
         failure["message"] = "Output file could not be written."
@@ -1678,7 +1760,7 @@ proc convert_cjs_file(input_path, output_path, target, mode):
         return failure
     let result = {}
     result["ok"] = true
-    result["code"] = converted["code"]
+    result["code"] = final_code
     result["diagnostics"] = converted["diagnostics"]
     return result
 

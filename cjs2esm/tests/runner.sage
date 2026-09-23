@@ -7,11 +7,11 @@ import io
 import sys
 import std.testing
 from cjs2esm.analyzer.cjs_usage import analyze_require_calls, classify_require_call
-from cjs2esm.converter import convert_cjs_text
+from cjs2esm.converter import cjs_redact_secrets, convert_cjs_file, convert_cjs_text
 from cjs2esm.lexer.javascript_lexer import js_code_tokens, js_tokenize
 from cjs2esm.lexer.js_scanner import js_scan_source
 from cjs2esm.printer.codegen import cjs_emit_default_export, cjs_emit_json_import, cjs_emit_named_import
-from cjs2esm.project.manifest import cjs_update_package_type_text
+from cjs2esm.project.manifest import cjs_update_package_file, cjs_update_package_type_text
 from cjs2esm.resolver.path_resolver import resolve_import_path
 from cjs2esm.transform.context import cjs_validate_mode, cjs_validate_target
 from cjs2esm.transform.pass_dynamic import cjs_dynamic_report
@@ -179,6 +179,27 @@ proc test_json_detection():
     testing.assert_equal(len(names), 1, "json count")
     testing.assert_equal(names[0], "./config.json", "json name")
 
+proc test_source_map_output():
+    let converted = convert_cjs_file("core/lib/transpiler/cjs2esm/tests/fixtures/runtime/order.cjs", "/tmp/opencode/cjs2esm-map-test.mjs", "node20", "compat", true)
+    testing.assert_true(converted["ok"], "mapped conversion")
+    let map_text = io.readfile("/tmp/opencode/cjs2esm-map-test.mjs.map")
+    testing.assert_not_nil(map_text, "map file")
+    testing.assert_contains(map_text, chr(34) + "version" + chr(34) + ":3", "map version")
+    testing.assert_contains(map_text, chr(34) + "mappings" + chr(34), "map mappings")
+    testing.assert_contains(converted["code"], "//# sourceMappingURL=cjs2esm-map-test.mjs.map", "map comment")
+
+proc test_package_file_update():
+    io.writefile("/tmp/opencode/cjs2esm-package.json", "{" + chr(10) + "  " + chr(34) + "name" + chr(34) + ": " + chr(34) + "bot" + chr(34) + chr(10) + "}")
+    let updated = cjs_update_package_file("/tmp/opencode/cjs2esm-package.json")
+    testing.assert_true(updated["ok"], "package file update")
+    testing.assert_true(updated["changed"], "package file changed")
+    testing.assert_contains(io.readfile("/tmp/opencode/cjs2esm-package.json"), chr(34) + "type" + chr(34) + ": " + chr(34) + "module" + chr(34), "package module type")
+
+proc test_secret_redaction():
+    let token = "Maaaaaaaaaaaaaaaaaaaaaaa.abcdef.abcdefghijklmnopqrstuvwxyz0"
+    testing.assert_equal(cjs_redact_secrets("saw " + token + " here"), "saw [REDACTED] here", "token redacted")
+    testing.assert_equal(cjs_redact_secrets("plain message"), "plain message", "plain message kept")
+
 proc main():
     let suite = testing.create_suite("cjs2esm")
     testing.add_test(suite, "scanner spans", test_scanner_spans)
@@ -203,6 +224,9 @@ proc main():
     testing.add_test(suite, "global prologue", test_global_prologue)
     testing.add_test(suite, "dynamic report", test_dynamic_report)
     testing.add_test(suite, "json detection", test_json_detection)
+    testing.add_test(suite, "source map output", test_source_map_output)
+    testing.add_test(suite, "package file update", test_package_file_update)
+    testing.add_test(suite, "secret redaction", test_secret_redaction)
     testing.run(suite)
     testing.report(suite)
     if suite["failed"] > 0:
