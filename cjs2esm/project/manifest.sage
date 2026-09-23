@@ -1,77 +1,176 @@
+gc_disable()
 # -----------------------------------------
 # manifest.sage - package.json handling for cjs2esm
-# Updates "type": "module" and handles ESM migration
 # -----------------------------------------
 
-import json
-import os
+import io
 
-proc read_package_json(file_path):
-    """Read and parse package.json file."""
-    try:
-        with open(file_path, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return nil
-    except json.JSONDecodeError as e:
-        print "Error parsing package.json: " + str(e)
-        return nil
+proc cjs_find_non_whitespace(text, start):
+    var index = start
+    while index < len(text):
+        let value = text[index]
+        if value != " " and value != chr(9) and value != chr(10) and value != chr(13):
+            return index
+        index = index + 1
+    return index
 
-proc write_package_json(file_path, data):
-    """Write package.json file with proper formatting."""
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+proc cjs_scan_json_string(text, start):
+    var index = start + 1
+    let result = {}
+    result["ok"] = false
+    result["stop"] = index
+    result["value"] = ""
+    while index < len(text):
+        let value = text[index]
+        if value == chr(92):
+            if index + 1 >= len(text):
+                return result
+            result["value"] = result["value"] + text[index] + text[index + 1]
+            index = index + 2
+        elif value == chr(34):
+            result["ok"] = true
+            result["stop"] = index + 1
+            return result
+        elif value == chr(10) or value == chr(13):
+            return result
+        else:
+            result["value"] = result["value"] + value
+            index = index + 1
+    return result
 
-proc update_type_to_module(file_path):
-    """Update or inject "type": "module" in package.json."""
-    data = read_package_json(file_path)
-    if data == nil:
-        # Create new package.json with type: module
-        data = {"type": "module", "name": "migrated-project", "version": "1.0.0"}
-        write_package_json(file_path, data)
-        return true
-    
-    if not dict_has(data, "type"):
-        data["type"] = "module"
-        write_package_json(file_path, data)
-        return true
-    
-    if data["type"] != "module":
-        data["type"] = "module"
-        write_package_json(file_path, data)
-        return true
-    
-    return false  # already type: module
+proc cjs_find_final_object_close(text):
+    var depth = 0
+    var index = 0
+    var final_close = -1
+    while index < len(text):
+        let value = text[index]
+        if value == chr(34):
+            let scanned = cjs_scan_json_string(text, index)
+            if not scanned["ok"]:
+                return -1
+            index = scanned["stop"]
+        elif value == "{":
+            depth = depth + 1
+            index = index + 1
+        elif value == "}":
+            depth = depth - 1
+            if depth < 0:
+                return -1
+            if depth == 0:
+                final_close = index
+            index = index + 1
+        else:
+            index = index + 1
+    if depth != 0:
+        return -1
+    return final_close
 
-# --- Generate migration report ---
-proc generate_migration_report(tracker, transform_state, project_path):
-    """Generate a JSON/Markdown migration report."""
-    
-    report = {
-        "source_project": project_path,
-        "transformations": {
-            "static_imports_converted": len([k for k in tracker.module_usages.keys() 
-                                              if tracker.classify_module(k) == "PURE_CJS"]),
-            "dynamic_requires_preserved": len([k for k in tracker.module_usages.keys() 
-                                                if tracker.classify_module(k) == "DYNAMIC"]),
-            "hoisting_conflicts": len(transform_state.hoisting_conflicts),
-            "module_classifications": {k: tracker.classify_module(k) for k in tracker.module_usages.keys()}
-        },
-        "diagnostics": [{"code": d["code"], "message": d["message"]} for d in transform_state.diagnostics],
-        "recommendations": []
-    }
-    
-    # Add recommendations based on findings
-    for module_name, classification in report["transformations"]["module_classifications"].items():
-        if classification == "DYNAMIC":
-            report["recommendations"].append(
-                f"Module '{module_name}' has dynamic/Complex CJS patterns - manual review recommended"
-            )
-    
-    if report["transformations"]["hoisting_conflicts"] > 0:
-        report["recommendations"].append(
-            f"{report['transformations']['hoisting_conflicts']} hoisting conflict(s) detected - review evaluation order"
-        )
-    
-    return report
+proc cjs_top_level_type_value(text):
+    var depth = 0
+    var index = 0
+    while index < len(text):
+        let value = text[index]
+        if value == chr(34):
+            let key = cjs_scan_json_string(text, index)
+            if not key["ok"]:
+                return nil
+            index = key["stop"]
+            index = cjs_find_non_whitespace(text, index)
+            if depth == 1 and key["value"] == "type" and index < len(text) and text[index] == ":":
+                index = cjs_find_non_whitespace(text, index + 1)
+                if index < len(text) and text[index] == chr(34):
+                    let parsed = cjs_scan_json_string(text, index)
+                    if not parsed["ok"]:
+                        return nil
+                    let result = {}
+                    result["found"] = true
+                    result["value"] = parsed["value"]
+                    result["start"] = index
+                    result["stop"] = parsed["stop"]
+                    return result
+                let result = {}
+                result["found"] = true
+                result["value"] = ""
+                result["start"] = index
+                result["stop"] = index
+                return result
+        elif value == "{":
+            depth = depth + 1
+            index = index + 1
+        elif value == "}":
+            depth = depth - 1
+            index = index + 1
+        else:
+            index = index + 1
+    return nil
+
+proc cjs_update_package_type_text(text):
+    let start = cjs_find_non_whitespace(text, 0)
+    if start >= len(text) or text[start] != "{":
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = "package.json does not contain a top-level object."
+        failure["text"] = text
+        return failure
+    let existing = cjs_top_level_type_value(text)
+    if existing != nil and existing["found"] and existing["value"] == "module":
+        let result = {}
+        result["ok"] = true
+        result["changed"] = false
+        result["text"] = text
+        return result
+    if existing != nil and existing["found"] and existing["value"] != "":
+        let result = {}
+        result["ok"] = true
+        result["changed"] = true
+        result["text"] = slice(text, 0, existing["start"]) + chr(34) + "module" + chr(34) + slice(text, existing["stop"], len(text))
+        return result
+    let final_close = cjs_find_final_object_close(text)
+    if final_close < 0:
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = "package.json is not balanced JSON."
+        failure["text"] = text
+        return failure
+    var before = final_close - 1
+    while before >= 0:
+        let value = text[before]
+        if value != " " and value != chr(9) and value != chr(10) and value != chr(13):
+            break
+        before = before - 1
+    let result = {}
+    result["ok"] = true
+    result["changed"] = true
+    if before >= 0 and text[before] == "{":
+        result["text"] = slice(text, 0, final_close) + chr(34) + "type" + chr(34) + ": " + chr(34) + "module" + chr(34) + slice(text, final_close, len(text))
+    else:
+        result["text"] = slice(text, 0, final_close) + "," + chr(10) + "  " + chr(34) + "type" + chr(34) + ": " + chr(34) + "module" + chr(34) + slice(text, final_close, len(text))
+    return result
+
+proc cjs_update_package_file(package_path):
+    let text = io.readfile(package_path)
+    if text == nil:
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = "package.json could not be read."
+        return failure
+    let updated = cjs_update_package_type_text(text)
+    if not updated["ok"]:
+        return updated
+    if updated["changed"]:
+        if not io.writefile(package_path, updated["text"]):
+            let failure = {}
+            failure["ok"] = false
+            failure["message"] = "package.json could not be written."
+            return failure
+    return updated
+
+proc cjs_write_migration_report(report_path, markdown):
+    if not io.writefile(report_path, markdown):
+        let failure = {}
+        failure["ok"] = false
+        failure["message"] = "Migration report could not be written."
+        return failure
+    let result = {}
+    result["ok"] = true
+    return result

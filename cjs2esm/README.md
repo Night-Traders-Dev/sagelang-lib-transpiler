@@ -4,71 +4,64 @@
 
 `cjs2esm` is a CommonJS → ECMAScript Modules transpiler written in **SageLang**. It converts CommonJS codebases into clean, runnable ESM projects while strictly preserving runtime execution order, export/import semantics, object identity, and Node.js-specific conveniences (`__dirname`, `__filename`, `require.resolve()`, `require.main`).
 
+## Current Implementation Status
+
+The checked-in converter is compatibility-first:
+
+- JavaScript sources are scanned with byte-accurate token spans.
+- Supported CommonJS bodies are preserved byte-for-byte.
+- Compatibility shims are injected only when the corresponding global is used.
+- `__dirname`, `__filename`, and complete `require.main === module` checks are rewritten.
+- Dynamic `require()` and `require.cache` manipulation remain on `createRequire`.
+- Existing ESM syntax, shadowed runtime globals, top-level `return`/`this`/`arguments`, and unbalanced input are rejected.
+- Static import rewriting, full AST parsing, source maps, package updates, async dynamic-import rewriting, secret redaction, and the full Discord.js verification harness remain planned work.
+
+Run the current tests with:
+
+```bash
+SAGE_PATH="$PWD/core/lib/transpiler:$PWD/core/lib" ./core/sage core/lib/transpiler/cjs2esm/tests/runner.sage
+```
+
 ## Project Structure
 
 ```
 cjs2esm/
-├── Makefile / build.sage          # SageLang build and LLVM compilation script
-├── README.md                      # This file
-├── plan.md                        # This specification document
-│
-├── src/
-│   ├── main.sage                 # CLI Entry point, command routing, exit codes
-│   │
-│   ├── lexer/
-│   │   ├── token.sage            # Token definitions, spans, TokenType enums
-│   │   ├── scanner.sage          # Lexical scanner engine with streaming buffer
-│   │   └── asi.sage              # Automatic Semicolon Insertion logic
-│   │
-│   ├── ast/
-│   │   ├── nodes.sage            # Base AST Node, Expression, Statement classes
-│   │   ├── declarations.sage     # Import, Export, Variable, Function AST nodes
-│   │   └── visitor.sage          # AST Visitor and Node Mutator interfaces
-│   │
-│   ├── parser/
-│   │   ├── parser.sage           # Recursive descent parsing coordinator
-│   │   ├── expression.sage       # Pratt precedence expression parser
-│   │   └── statements.sage       # Statement, block, and declaration parser
-│   │
-│   ├── analyzer/
-│   │   ├── scope.sage            # Lexical Scope Tree & Identifier bindings
-│   │   ├── classifier.sage       # Module classifier (PURE_CJS, DYNAMIC, etc.)
-│   │   └── cjs_usage.sage        # Detects requires, exports, globals, and hoisting
-│   │
-│   ├── resolver/
-│   │   ├── path_resolver.sage    # Relative path, extension, and directory index resolution
-│   │   ├── package_json.sage     # Conditional exports & package resolution
-│   │   └── node_builtins.sage    # Built-in modules list (node:fs, path, etc.)
-│   │
-│   ├── transform/
-│   │   ├── context.sage          # Transform pass state and active configuration
-│   │   ├── pass_imports.sage     # Static/destructured require to import
-│   │   ├── pass_exports.sage     # module.exports / exports.* to export declarations
-│   │   ├── pass_globals.sage     # __dirname, __filename, require.resolve, require.main
-│   │   ├── pass_dynamic.sage     # createRequire injection or async dynamic import shims
-│   │   └── pass_json.sage        # JSON import attributes and destructuring synthesis
-│   │
-│   ├── printer/
-│   │   ├── codegen.sage          # Formatted JavaScript source code emitter
-│   │   ├── sourcemap.sage        # Base64 VLQ source map generator (.map)
-│   │   └── comments.sage         # Trivia attachment and comment preservation
-│   │
-│   └── project/
-│       ├── workspace.sage        # Multi-file graph orchestrator and file I/O
-│       ├── manifest.sage         # package.json updates ("type": "module")
-│       └── reporter.sage         # JSON/Markdown migration report generator
-│
+├── README.md
+├── plan.md
+├── main.sage
+├── converter.sage
+├── lexer/
+│   ├── js_token.sage
+│   ├── js_scanner.sage
+│   └── javascript_lexer.sage
+├── analyzer/
+│   └── cjs_usage.sage
+├── ast/
+│   └── astnodes.sage
+├── transform/
+│   ├── context.sage
+│   ├── pass_imports.sage
+│   ├── pass_exports.sage
+│   ├── pass_globals.sage
+│   ├── pass_dynamic.sage
+│   └── pass_json.sage
+├── printer/
+│   └── codegen.sage
+├── resolver/
+│   └── path_resolver.sage
+├── project/
+│   └── manifest.sage
 └── tests/
-    ├── runner.sage               # Native SageLang integration test runner
-    ├── fixtures/
-    │   ├── basic/                # Primitives, functions, control flow
-    │   ├── exports/              # Object exports, aliasing, reassignments
-    │   ├── json/                 # JSON attribute imports and destructuring
-    │   └── discordjs/            # Headless Discord.js mock test suites
-    │       ├── bot-bootstrap/
-    │       ├── command-handler/
-    │       ├── event-handler/
-    │       └── slash-builders/
+    ├── runner.sage
+    └── fixtures/
+        ├── basic/
+        ├── exports/
+        ├── json/
+        ├── runtime/
+        └── discordjs/
+            ├── bot-bootstrap/
+            ├── command-handler/
+            └── slash-builders/
 ```
 
 ## CLI Specification
@@ -84,16 +77,11 @@ cjs2esm report <project-path>
 
 ### Options & Flags
 
-* `--out=<dir>`: Output directory for transpiled files (defaults to in-place or `./dist`).
-* `--target=<node18|node20|node22|node24>`: Target Node.js baseline (default: `node20`).
-* `--mode=<strict|compat|discord>`:
-  - `strict`: Avoid compatibility shims; fail on unresolved dynamic requires.
-  - `compat`: Automatically inject `createRequire` and fallback shims where needed.
-  - `discord`: Optimized for Discord.js bot architectures; handles dynamic command loaders.
-* `--rewrite-dynamic-imports`: Converts filesystem dynamic `require()` calls into `await import()`.
-* `--source-maps`: Generates `.map` files alongside converted `.js` files.
-* `--update-package-json`: Updates or injects `"type": "module"` in `package.json`.
+* `--out=<file.mjs|dir>`: Output file or directory. Without `--out`, the converter writes a same-directory `.mjs` file.
+* `--target=<node18|node20|node22|node24>`: Target Node.js baseline (default: `node20`). All current targets use the conservative `fileURLToPath` compatibility shims.
+* `--mode=<compat|discord>`: Compatibility conversion. Both modes currently preserve inline execution order with `createRequire`.
 * `--dry-run`: Runs analysis, prints diagnostics, and generates report without writing to disk.
+* `--source-maps`, `--update-package-json`, `--rewrite-dynamic-imports`, and `--mode strict` are not implemented yet and return explicit errors.
 
 ## Diagnostic Codes
 
@@ -107,13 +95,15 @@ Every transformed construct is evaluated against confidence levels:
 
 ### Diagnostic Registry
 
-* `CJS101` — **Destructured require converted to named ESM import** (`[SAFE]`).
-* `CJS102` — **Dynamic require preserved via `createRequire`** (`[COMPAT_SHIM]`).
-* `CJS103` — **`__dirname` / `__filename` converted to target specifier** (`[SAFE]`).
-* `CJS104` — **JSON require rewritten with import attributes & synthesized bindings** (`[SAFE]`).
-* `CJS201` — **Hoisting conflict detected: executable statement precedes require** (`[SEMANTIC_CHANGE]`).
-* `CJS202` — **`require.cache` invalidation detected: module unloading unsupported in native ESM** (`[MANUAL_REVIEW]`).
-* `CJS301` — **Dynamic export structure preserved via default export object** (`[COMPAT_SHIM]`).
+The current converter emits:
+
+* `CJS102` — **Require preserved via `createRequire`** (`[COMPAT_SHIM]`).
+* `CJS103` — **`__dirname`, `__filename`, or `require.main` converted to a conservative target expression** (`[SAFE]`).
+* `CJS202` — **`require.cache` manipulation preserved on `createRequire`** (`[MANUAL_REVIEW]`).
+* `CJS301` — **`module.exports` reassignment preserved through the default export object** (`[COMPAT_SHIM]`).
+* `CJS400`–`CJS403` — **Unsupported, shadowed, malformed, or unbalanced input.**
+
+The full planned registry also includes static-import conversion (`CJS101`), JSON import-attribute synthesis (`CJS104`), and explicit hoisting diagnostics (`CJS201`). Those remain future work.
 
 ## Phased Implementation Roadmap
 
@@ -160,15 +150,15 @@ Every transformed construct is evaluated against confidence levels:
 
 Bot repositories frequently store tokens and keys in local configuration files or scripts. The transpiler guarantees:
 
-* **Token Redaction**: Any token matching regex patterns for Discord Bot tokens (`[MNO][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27,}`) is stripped from diagnostic outputs and reports.
-* **Non-Execution**: The transpiler parses ASTs statically and never evaluates or executes project source code at transform time.
-* **Credential Isolation**: `.env` and secret configuration files are excluded from diagnostic output.
+* **Token Redaction**: Planned. Discord Bot token patterns are not yet stripped from diagnostic outputs and reports.
+* **Non-Execution**: The transpiler scans input statically and never evaluates or executes project source code at transform time.
+* **Credential Isolation**: Planned. `.env` and secret configuration files are not yet specially excluded from diagnostic output.
 
 ## Verification & Differential Testing Strategy
 
 ### Headless Discord.js Fixture Suite
 
-To ensure deterministic CI runs without network dependencies or live gateway tokens, testing is conducted offline:
+The current converter has passing Sage scanner/converter tests and manually verified Node `.mjs` output for dependency-free runtime fixtures. A deterministic offline CI harness is still planned. Its intended checks are:
 
 1. **Builder Serialization Verification**:
    - Construct `SlashCommandBuilder` and `EmbedBuilder` instances in CJS.

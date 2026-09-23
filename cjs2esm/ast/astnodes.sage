@@ -177,4 +177,4 @@ class TransformState:
         self.diagnostics = []  # list of (code, message, severity)
         self.target = "node20"  # default target
         self.mode = "compat"  # default mode
-        self.seen_runtime_globals = set()  # __dirname, __filename, etc.
+        self.seen_runtime_globals = []  # __dirname, __filename, etc.
