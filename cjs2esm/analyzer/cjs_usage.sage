@@ -3,8 +3,8 @@ gc_disable()
 # cjs_usage.sage - Scope and require/export analysis for cjs2esm
 # -----------------------------------------
 
-from lexer.js_scanner import js_scan_source
-from lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.lexer.js_scanner import js_scan_source
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
 
 class ScopeLevel:
     proc init(level_type, parent):

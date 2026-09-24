@@ -3,10 +3,10 @@ gc_disable()
 # parser.sage - Program-level parse coordinator for cjs2esm
 # -----------------------------------------
 
-from lexer.js_scanner import js_scan_source
-from lexer.js_token import js_is_code_token
-from parser.expression import js_parse_expression_tokens
-from parser.statements import parse_statements
+from transpiler.cjs2esm.lexer.js_scanner import js_scan_source
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.parser.expression import js_parse_expression_tokens
+from transpiler.cjs2esm.parser.statements import parse_statements
 
 proc parse_program(source):
     let scan = js_scan_source(source)

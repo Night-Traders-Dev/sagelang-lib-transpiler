@@ -4,7 +4,7 @@ gc_disable()
 # -----------------------------------------
 
 import io
-from resolver.package_json import cjs_package_main_entry
+from transpiler.cjs2esm.resolver.package_json import cjs_package_main_entry
 
 proc cjs_path_starts_with(value, prefix):
     if value == nil or prefix == nil:

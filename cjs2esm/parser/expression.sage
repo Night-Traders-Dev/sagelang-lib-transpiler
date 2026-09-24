@@ -3,7 +3,7 @@ gc_disable()
 # expression.sage - Pratt expression parser for cjs2esm
 # -----------------------------------------
 
-from lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
 
 proc js_expr_node(kind, start, stop):
     let node = {}

@@ -3,11 +3,11 @@ gc_disable()
 # converter.sage - Compatibility-first CommonJS to ESM converter
 # -----------------------------------------
 
-from lexer.js_scanner import js_scan_source
-from lexer.js_token import js_is_code_token
-from printer.sourcemap import cjs_build_source_map, cjs_count_lines
-from resolver.path_resolver import resolve_import_path
-from transform.pass_dynamic import cjs_dyn_argument_may_be_path, cjs_dyn_rewritable_calls
+from transpiler.cjs2esm.lexer.js_scanner import js_scan_source
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.printer.sourcemap import cjs_build_source_map, cjs_count_lines
+from transpiler.cjs2esm.resolver.path_resolver import resolve_import_path
+from transpiler.cjs2esm.transform.pass_dynamic import cjs_dyn_argument_may_be_path, cjs_dyn_rewritable_calls
 
 proc cjs_text_in_list(text, values):
     var index = 0

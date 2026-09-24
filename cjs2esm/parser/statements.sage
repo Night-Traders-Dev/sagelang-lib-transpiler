@@ -3,7 +3,7 @@ gc_disable()
 # statements.sage - Top-level statement splitter for cjs2esm
 # -----------------------------------------
 
-from lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
 
 proc cjs_statement_items(scan):
     let items = []

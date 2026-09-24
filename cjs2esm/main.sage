@@ -5,11 +5,11 @@ gc_disable()
 
 import io
 import sys
-from converter import cjs_ends_with, cjs_starts_with, convert_cjs_file, convert_cjs_text
-from parser.parser import parse_program
-from project.manifest import cjs_update_package_file
-from project.reporter import cjs_markdown_report, cjs_report_summary
-from project.workspace import cjs_analyze_project
+from transpiler.cjs2esm.converter import cjs_ends_with, cjs_starts_with, convert_cjs_file, convert_cjs_text
+from transpiler.cjs2esm.parser.parser import parse_program
+from transpiler.cjs2esm.project.manifest import cjs_update_package_file
+from transpiler.cjs2esm.project.reporter import cjs_markdown_report, cjs_report_summary
+from transpiler.cjs2esm.project.workspace import cjs_analyze_project
 
 proc cjs_print_usage():
     print "Usage:"

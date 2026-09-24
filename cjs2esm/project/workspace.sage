@@ -4,7 +4,7 @@ gc_disable()
 # -----------------------------------------
 
 import io
-from cjs2esm.converter import convert_cjs_file, convert_cjs_text
+from transpiler.cjs2esm.converter import convert_cjs_file, convert_cjs_text
 
 proc cjs_workspace_path_starts_with(value, prefix):
     if value == nil or prefix == nil or len(value) < len(prefix):

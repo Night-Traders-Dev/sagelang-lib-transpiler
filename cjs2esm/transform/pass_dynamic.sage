@@ -3,8 +3,8 @@ gc_disable()
 # pass_dynamic.sage - Dynamic require and cache diagnostics
 # -----------------------------------------
 
-from lexer.js_scanner import js_scan_source
-from lexer.js_token import js_is_code_token
+from transpiler.cjs2esm.lexer.js_scanner import js_scan_source
+from transpiler.cjs2esm.lexer.js_token import js_is_code_token
 
 proc cjs_dynamic_report(source):
     let scan = js_scan_source(source)
