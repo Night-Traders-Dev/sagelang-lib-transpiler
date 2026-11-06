@@ -33,6 +33,7 @@ import token
 let Parser = parser.Parser
 let MAX_DEPTH = 500
 
+@no_vm
 class LilyParser(Parser):
     proc init(self, source):
         self.lexer = lily_lexer.LilyLexer(source)
@@ -72,13 +73,13 @@ class LilyParser(Parser):
         # Lily ptr x -> __deref__(x)
         if self.match_tok(lily_lexer.TOKEN_PTR):
             let right = self.parse_unary()
-            let callee = ast.variable_expr(token.Token(token.TOKEN_IDENTIFIER, "__deref__", self.previous().line, self.previous().col))
+            let callee = ast.variable_expr(token.Token(token.TOKEN_IDENTIFIER, "__deref__", self.previous().line))
             return ast.call_expr(callee, [right])
 
         # Lily addr x -> __addr__(x)
         if self.match_tok(lily_lexer.TOKEN_ADDR):
             let right = self.parse_unary()
-            let callee = ast.variable_expr(token.Token(token.TOKEN_IDENTIFIER, "__addr__", self.previous().line, self.previous().col))
+            let callee = ast.variable_expr(token.Token(token.TOKEN_IDENTIFIER, "__addr__", self.previous().line))
             return ast.call_expr(callee, [right])
 
         # Default fallback to Sage parser for everything else

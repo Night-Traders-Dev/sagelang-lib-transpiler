@@ -123,7 +123,7 @@ class LilyLexer:
                 return false
 
     proc make_token(self, type, value):
-        let t = Token(type, value, self.line, self.col)
+        let t = Token(type, value, self.line)
         push(self.tokens, t)
         return t
 
